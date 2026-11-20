@@ -19,7 +19,7 @@ import json
 import sys
 from pathlib import Path
 
-CORE = ("id", "title", "parentId", "summary", "text", "docs", "tags", "link", "linkLabel")
+CORE = ("id", "title", "parentId", "summary", "text", "expanded", "docs", "tags", "link", "linkLabel")
 
 
 def die(msg: str, code: int = 1) -> None:
