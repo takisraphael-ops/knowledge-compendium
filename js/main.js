@@ -27,7 +27,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "./model.js";
-import { escapeHtml, renderDepth, renderFullNotes, FULL_NOTES_LABEL } from "./notes.js";
+import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, hasOriginalToggle, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -100,6 +100,7 @@ const state = {
   editing: false,
   depthOpen: false,
   fullNotesOpen: false,
+  showOriginal: false,
   sections: {},
   query: "",
   hits: [],
@@ -383,6 +384,7 @@ function select(id, { toggle = false } = {}) {
   state.editing = false;
   state.depthOpen = false;
   state.fullNotesOpen = false;
+  state.showOriginal = false;
   for (const a of ancestorIds(state.index, id)) state.expanded.add(a);
   const kids = visibleKids(id);
   if (toggle && kids.length && id !== state.index.rootId) {
@@ -485,6 +487,7 @@ function runSearch(options = {}) {
     state.selected = state.hits[0];
     state.editing = false;
     state.depthOpen = false;
+    state.showOriginal = false;
   }
   draw();
   const n = state.hits.length;
@@ -611,7 +614,8 @@ function renderPanel() {
       </div>
       <label class="field">Title<input id="f-title" value="${escapeHtml(node.title)}"></label>
       <label class="field">Summary<textarea id="f-summary" rows="3">${escapeHtml(node.summary)}</textarea></label>
-      <label class="field">Notes<textarea id="f-text" rows="12">${escapeHtml(node.text)}</textarea></label>
+      <label class="field">Your notes <span class="hint-text">tidied version, shown first on the topic</span><textarea id="f-tidy" rows="12">${escapeHtml(node.tidy || node.text || "")}</textarea></label>
+      <label class="field">Original wording <span class="hint-text">kept verbatim; one tap away on the topic page</span><textarea id="f-text" rows="8">${escapeHtml(node.text)}</textarea></label>
       <label class="field">Expanded explanation <span class="hint-text">added by Grokimus; yours to edit</span><textarea id="f-expanded" rows="10">${escapeHtml(node.expanded || "")}</textarea></label>
       <p class="hint-text">Lines that start with @@ name a source. ### is a heading, “- ” is a bullet, and “| a | b |” is a table.</p>
       <label class="field">Sources <span class="hint-text">codes, comma separated</span><input id="f-docs" value="${escapeHtml((node.docs || []).join(", "))}"></label>
@@ -620,7 +624,17 @@ function renderPanel() {
     return;
   }
 
-  const more = (node.text || node.expanded)
+  const canToggle = hasOriginalToggle(node);
+  const yourNotes = (node.tidy || node.text)
+    ? `<section class="your-notes">
+         <div class="your-notes-bar">
+           <div class="your-notes-label">${escapeHtml(YOUR_NOTES_LABEL)}</div>
+           ${canToggle ? `<button type="button" class="wording-toggle" data-act="wording" aria-pressed="${state.showOriginal ? "true" : "false"}">${state.showOriginal ? escapeHtml(SHOW_TIDIED) : escapeHtml(SHOW_ORIGINAL)}</button>` : ""}
+         </div>
+         <div id="your-notes-body" class="notes"></div>
+       </section>`
+    : "";
+  const more = (node.expanded && String(node.expanded).trim())
     ? `<button type="button" class="depth-btn" data-act="depth" aria-expanded="${state.depthOpen ? "true" : "false"}">${state.depthOpen ? "Hide depth" : "More depth"}</button>
        <div id="depth-body" class="notes" ${state.depthOpen ? "" : "hidden"}></div>`
     : "";
@@ -644,6 +658,7 @@ function renderPanel() {
     ${node.summary ? `<p class="summary">${escapeHtml(node.summary)}</p>` : ""}
     ${link}
     ${docs || tags ? `<div class="chips">${docs}${tags}</div>` : ""}
+    ${yourNotes}
     ${more}
     ${fullNotes}
     ${kidLinks ? `<h2 class="subhead">Subtopics</h2><div class="subtopics">${kidLinks}</div>` : ""}
@@ -653,7 +668,9 @@ function renderPanel() {
       ${id === state.index.rootId ? "" : `<button type="button" data-act="move">Move</button><button type="button" class="danger" data-act="delete">Delete</button>`}
     </div>`;
 
-  if (state.depthOpen && (node.text || node.expanded)) {
+  const notesBody = $("your-notes-body");
+  if (notesBody) notesBody.innerHTML = renderYourNotes(node, state.showOriginal);
+  if (state.depthOpen && node.expanded && String(node.expanded).trim()) {
     const box = $("depth-body");
     if (box) box.innerHTML = renderDepth(node);
   }
@@ -673,6 +690,7 @@ function saveForm() {
     title: $("f-title").value.trim() || "Untitled",
     summary: $("f-summary").value.trim(),
     text: $("f-text").value,
+    tidy: $("f-tidy") ? $("f-tidy").value : node.tidy || "",
     expanded: $("f-expanded") ? $("f-expanded").value : node.expanded || "",
     docs: readList($("f-docs").value),
     tags: readList($("f-tags").value),
@@ -970,6 +988,13 @@ function onPanelClick(e) {
     history.replaceState(null, "", location.pathname + location.search);
     draw();
     renderPanel();
+  } else if (act === "wording") {
+    state.showOriginal = !state.showOriginal;
+    const node = state.index.byId.get(state.selected);
+    const box = $("your-notes-body");
+    if (box && node) box.innerHTML = renderYourNotes(node, state.showOriginal);
+    btn.setAttribute("aria-pressed", state.showOriginal ? "true" : "false");
+    btn.textContent = state.showOriginal ? SHOW_TIDIED : SHOW_ORIGINAL;
   } else if (act === "depth") {
     state.depthOpen = !state.depthOpen;
     const box = $("depth-body");

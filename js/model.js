@@ -16,7 +16,7 @@ export const DOC_NAMES = {
   TB: "Tide book",
 };
 
-const CORE = ["id", "title", "parentId", "summary", "text", "expanded", "docs", "tags"];
+const CORE = ["id", "title", "parentId", "summary", "text", "tidy", "expanded", "docs", "tags"];
 
 export function docLabel(code) {
   return DOC_NAMES[code] || code;
@@ -34,6 +34,7 @@ export function normalizeNode(raw) {
     parentId: n.parentId == null || n.parentId === "" ? null : String(n.parentId),
     summary: String(n.summary ?? ""),
     text: String(n.text ?? ""),
+    tidy: String(n.tidy ?? ""),
     expanded: String(n.expanded ?? ""),
     docs: Array.isArray(n.docs) ? n.docs.map(String) : [],
     tags: Array.isArray(n.tags) ? n.tags.map(String) : [],
@@ -223,7 +224,7 @@ export function idsPassingDocFilter(index, doc) {
 }
 
 export function searchBlob(node) {
-  return [node.title, node.summary, node.text, node.expanded || "", ...(node.docs || []), ...(node.tags || [])]
+  return [node.title, node.summary, node.text, node.tidy || "", node.expanded || "", ...(node.docs || []), ...(node.tags || [])]
     .join("\n")
     .toLowerCase();
 }
@@ -247,7 +248,7 @@ export function listsEqual(a, b) {
 /** Patch fields that differ from the base node. Empty object if nothing changed. */
 export function diffNode(base, next) {
   const patch = {};
-  for (const key of ["title", "summary", "text", "expanded", "parentId", "link", "linkLabel"]) {
+  for (const key of ["title", "summary", "text", "tidy", "expanded", "parentId", "link", "linkLabel"]) {
     const bv = base?.[key] ?? (key === "parentId" ? null : "");
     const nv = next?.[key] ?? (key === "parentId" ? null : "");
     if (bv !== nv) patch[key] = next?.[key] ?? (key === "parentId" ? null : "");

@@ -120,13 +120,40 @@ export function renderNotes(text) {
 
 export const EXPANDED_LABEL = "Expanded explanation (added by Grokimus)";
 
-/** Depth panel body: the owner's own notes first, then the separately labelled expanded explanation. */
-export function renderDepth(node) {
-  let html = node.text ? renderNotes(node.text) : "";
+export const YOUR_NOTES_LABEL = "Your notes";
+export const SHOW_ORIGINAL = "Show original wording";
+export const SHOW_TIDIED = "Show tidied version";
+
+/** Prefer the tidied version when present; otherwise the original wording. */
+export function displayNotes(node, showOriginal = false) {
+  const tidy = String(node?.tidy || "");
+  const text = String(node?.text || "");
+  if (showOriginal) return text;
+  return tidy.trim() ? tidy : text;
+}
+
+export function hasOriginalToggle(node) {
+  const tidy = String(node?.tidy || "").trim();
+  const text = String(node?.text || "").trim();
+  return !!(tidy && text && tidy !== text);
+}
+
+export function renderYourNotes(node, showOriginal = false) {
+  const body = displayNotes(node, showOriginal);
+  return body ? renderNotes(body) : "";
+}
+
+/** Expanded explanation only (shown under More depth). */
+export function renderExpanded(node) {
   if (node.expanded && String(node.expanded).trim()) {
-    html += `<section class="expanded-block"><div class="expanded-label">${escapeHtml(EXPANDED_LABEL)}</div>${renderNotes(node.expanded)}</section>`;
+    return `<section class="expanded-block"><div class="expanded-label">${escapeHtml(EXPANDED_LABEL)}</div>${renderNotes(node.expanded)}</section>`;
   }
-  return html;
+  return "";
+}
+
+/** Back-compat: depth box is now the expanded explanation only. */
+export function renderDepth(node) {
+  return renderExpanded(node);
 }
 
 export const FULL_NOTES_LABEL = "Full notes (from your original document)";

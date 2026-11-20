@@ -279,6 +279,45 @@ header {
   font-weight: 650;
 }
 .chip.quiet { background: #f0ebe3; color: #4e463c; font-weight: 600; }
+
+.your-notes {
+  background: #fbfaf6;
+  border: 1px solid #e6e0d6;
+  border-left: 3px solid #c4a35a;
+  border-radius: 12px;
+  padding: 10px 12px 4px;
+  margin: 8px 0 14px;
+}
+.your-notes-bar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.your-notes-label {
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 750;
+  color: #6a5424;
+}
+.wording-toggle {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--teal);
+  background: transparent;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+.wording-toggle:hover { color: #1d4a45; }
+.wording-toggle[aria-pressed="true"] { color: #6a5424; }
 .depth-btn { margin: 4px 0 8px; }
 .notes { font-family: var(--serif); font-size: 16.5px; line-height: 1.5; }
 .notes p { margin: 0 0 0.6em; }
