@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#f3f1ec">
+  <title>Knowledge Compendium</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%231f2a2e'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23f3f1ec'/%3E%3Cpath d='M16 16 L28 8 M16 16 L27 20 M16 16 L8 27 M16 16 L6 10' stroke='%237d8c86' stroke-width='1.4' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="gate">
+    <form id="gate-form" class="gate-card" autocomplete="off">
+      <div class="mark" aria-hidden="true"></div>
+      <h1>Knowledge Compendium</h1>
+      <p class="lede">These notes are encrypted. The passphrase is used only in this browser and is never uploaded.</p>
+      <p id="gate-demo" class="demo-note" hidden>This copy is a demo catalog. Its passphrase is printed in the project README.</p>
+      <div id="saved-row" class="saved-row" hidden>
+        <button type="button" class="solid" id="continue-saved">Unlock saved key</button>
+        <button type="button" class="linkish" id="forget-saved">Forget this device</button>
+      </div>
+      <label class="field" for="passphrase">Passphrase
+        <input id="passphrase" type="password" name="passphrase" autocomplete="current-password" spellcheck="false">
+      </label>
+      <label class="check"><input id="remember" type="checkbox"> Remember the unlock on this device</label>
+      <button class="solid" type="submit">Unlock</button>
+      <p id="gate-error" class="error" role="alert"></p>
+      <p id="gate-status" class="status" role="status"></p>
+    </form>
+  </div>
+
+  <div id="app" hidden>
+    <header>
+      <div class="brand" id="brand">Knowledge Compendium</div>
+      <div class="count" id="count"></div>
+      <div class="search-wrap">
+        <input id="search" type="search" placeholder="Search topics" aria-label="Search topics" autocomplete="off">
+        <div class="match-nav">
+          <span id="match-label"></span>
+          <button type="button" id="match-prev" aria-label="Previous match">‹</button>
+          <button type="button" id="match-next" aria-label="Next match">›</button>
+        </div>
+      </div>
+      <div class="tools">
+        <select id="doc-filter" aria-label="Filter by source document"></select>
+        <button type="button" class="tool" id="edits-btn">Edits</button>
+        <button type="button" class="tool" id="lock-btn">Lock</button>
+      </div>
+      <div id="edits-menu" class="menu" hidden></div>
+    </header>
+    <div id="stage">
+      <div id="viewport">
+        <div id="world">
+          <svg id="edges" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
+          <div id="nodes"></div>
+        </div>
+      </div>
+      <div class="map-controls left">
+        <button type="button" id="expand-all">Expand all</button>
+        <button type="button" id="collapse-all">Collapse all</button>
+      </div>
+      <div class="map-controls right">
+        <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+        <button type="button" id="zoom-label" disabled>100%</button>
+        <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+        <button type="button" id="fit">Fit</button>
+      </div>
+      <p id="hint">Drag to pan. Pinch or scroll to zoom. Tap a topic to open it.</p>
+      <aside id="panel" aria-label="Topic"></aside>
+    </div>
+  </div>
+
+  <div id="modal" hidden></div>
+  <div id="toast" hidden role="status"></div>
+  <noscript>This compendium needs JavaScript to decrypt and draw the map.</noscript>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

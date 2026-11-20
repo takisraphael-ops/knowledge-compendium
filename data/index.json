@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "kdf": {
+    "name": "PBKDF2",
+    "hash": "SHA-256",
+    "iterations": 600000,
+    "salt": "rzTmOWQTHmAI1gQln6MruQ=="
+  },
+  "branches": [
+    {
+      "id": "tree",
+      "file": "tree.enc.json"
+    },
+    {
+      "id": "cybersecurity",
+      "file": "cybersecurity.enc.json"
+    }
+  ]
+}
