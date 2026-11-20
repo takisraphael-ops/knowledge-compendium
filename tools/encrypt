@@ -1,0 +1,192 @@
+#!/usr/bin/env node
+// Encrypt plaintext branch JSON files into data/*.enc.json + data/index.json.
+// AES-GCM, key from PBKDF2-SHA-256. The browser decrypts with the same Web Crypto calls.
+
+import { readdir, readFile, writeFile, mkdir, unlink } from "node:fs/promises";
+import { join, basename } from "node:path";
+import { stdin, stdout, exit } from "node:process";
+import {
+  DEFAULT_ITERATIONS,
+  bytesToB64,
+  decryptJson,
+  deriveKey,
+  encryptJson,
+  randomBytes,
+} from "../js/crypto.js";
+
+function usage() {
+  return `Usage: node tools/encrypt --input <plaintext-dir> --output <data-dir> [--iterations ${DEFAULT_ITERATIONS}] [--fresh-salt] [--demo]
+
+Reads KC_PASSPHRASE from the environment, or prompts with hidden input.
+Encrypts every *.json in the input directory except index.json.
+tree.json is listed first; other files follow in alphabetical order.
+A branch id is the file name without .json. Re-running reuses the salt and
+iteration count already in <output>/index.json so a remembered unlock still works.
+--fresh-salt rotates the salt (every branch must be re-encrypted).
+--demo marks the catalog as a sample so the site points at the README.`;
+}
+
+function parseArgs(argv) {
+  const out = { iterations: DEFAULT_ITERATIONS, fresh: false, demo: false };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--help" || arg === "-h") out.help = true;
+    else if (arg === "--input") out.input = argv[++i];
+    else if (arg === "--output") out.output = argv[++i];
+    else if (arg === "--iterations") out.iterations = Number(argv[++i]);
+    else if (arg === "--fresh-salt") out.fresh = true;
+    else if (arg === "--demo") out.demo = true;
+    else if (arg === "--passphrase-stdin") out.stdin = true;
+    else {
+      console.error(`Unknown argument: ${arg}`);
+      exit(1);
+    }
+  }
+  return out;
+}
+
+function promptHidden(question) {
+  return new Promise((resolve) => {
+    stdout.write(question);
+    stdin.setRawMode(true);
+    stdin.resume();
+    let value = "";
+    const onData = (buf) => {
+      const text = buf.toString("utf8");
+      if (text === "\u0003") {
+        stdout.write("\n");
+        exit(130);
+      }
+      if (text === "\r" || text === "\n") {
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdin.off("data", onData);
+        stdout.write("\n");
+        resolve(value);
+        return;
+      }
+      if (text === "\u007f" || text === "\b") {
+        value = value.slice(0, -1);
+        return;
+      }
+      if (text >= " ") value += text;
+    };
+    stdin.on("data", onData);
+  });
+}
+
+async function readPassphrase(args) {
+  if (args.stdin) {
+    const chunks = [];
+    for await (const chunk of stdin) chunks.push(chunk);
+    return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+  }
+  if (process.env.KC_PASSPHRASE) return process.env.KC_PASSPHRASE;
+  if (!stdin.isTTY) {
+    console.error("Set KC_PASSPHRASE or run in a terminal so the passphrase can be prompted.");
+    exit(1);
+  }
+  const first = await promptHidden("Passphrase: ");
+  const second = await promptHidden("Confirm: ");
+  if (first !== second) {
+    console.error("Passphrases did not match.");
+    exit(1);
+  }
+  return first;
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.help || !args.input || !args.output) {
+    console.log(usage());
+    exit(args.help ? 0 : 1);
+  }
+  if (!Number.isInteger(args.iterations) || args.iterations < 100_000) {
+    console.error("Iterations must be an integer >= 100000.");
+    exit(1);
+  }
+  const names = (await readdir(args.input))
+    .filter((name) => name.endsWith(".json") && name !== "index.json" && !name.endsWith(".enc.json"))
+    .sort((a, b) => {
+      if (a === "tree.json") return -1;
+      if (b === "tree.json") return 1;
+      return a.localeCompare(b);
+    });
+  if (!names.length) {
+    console.error(`No branch JSON files in ${args.input}`);
+    exit(1);
+  }
+
+  await mkdir(args.output, { recursive: true });
+  let salt = randomBytes(16);
+  let iterations = args.iterations;
+  const indexPath = join(args.output, "index.json");
+  if (!args.fresh) {
+    try {
+      const existing = JSON.parse(await readFile(indexPath, "utf8"));
+      if (existing?.kdf?.salt && existing?.kdf?.iterations) {
+        salt = Uint8Array.from(Buffer.from(existing.kdf.salt, "base64"));
+        iterations = existing.kdf.iterations;
+        if (args.iterations !== DEFAULT_ITERATIONS && args.iterations !== iterations) {
+          console.error("Existing catalog uses a different iteration count. Pass --fresh-salt to rotate.");
+          exit(1);
+        }
+      }
+    } catch {
+      /* first encrypt */
+    }
+  }
+
+  const passphrase = await readPassphrase(args);
+  if (!passphrase) {
+    console.error("Passphrase is empty.");
+    exit(1);
+  }
+  if (passphrase.length < 8) console.error("Warning: passphrase is shorter than 8 characters.");
+
+  const key = await deriveKey(passphrase, salt, iterations, true);
+  const branches = [];
+  for (const name of names) {
+    const id = basename(name, ".json");
+    const obj = JSON.parse(await readFile(join(args.input, name), "utf8"));
+    const enc = await encryptJson(key, obj, id);
+    const back = await decryptJson(key, enc, id);
+    if (JSON.stringify(back) !== JSON.stringify(obj)) {
+      console.error(`Round-trip check failed for ${name}`);
+      exit(1);
+    }
+    const file = `${id}.enc.json`;
+    await writeFile(join(args.output, file), `${JSON.stringify(enc, null, 2)}\n`);
+    const count = Array.isArray(obj) ? obj.length : obj.nodes?.length ?? 0;
+    branches.push({ id, file });
+    console.log(`  ${file}  ${count} nodes`);
+  }
+
+  const index = {
+    v: 1,
+    kdf: {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations,
+      salt: bytesToB64(salt),
+    },
+    branches,
+  };
+  if (args.demo) index.demo = true;
+  await writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`);
+
+  const keep = new Set(branches.map((b) => b.file));
+  for (const name of await readdir(args.output)) {
+    if (name.endsWith(".enc.json") && !keep.has(name)) {
+      await unlink(join(args.output, name));
+      console.log(`  removed stale ${name}`);
+    }
+  }
+  console.log(`Encrypted ${branches.length} branch file(s) → ${args.output}`);
+  console.log(`KDF PBKDF2-SHA-256, ${iterations} iterations. Plaintext was not written to the output.`);
+}
+
+main().catch((err) => {
+  console.error(err?.message || err);
+  exit(1);
+});

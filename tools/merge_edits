@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Fold a compendium "Export edits" JSON file into plaintext branch files.
+
+Usage:
+  python3 tools/merge_edits edits.json plaintext_dir/
+  python3 tools/merge_edits edits.json plaintext_dir/cybersecurity.json
+  python3 tools/merge_edits edits.json plaintext_dir/ --dry-run
+
+added nodes are inserted into the file that already contains their parent
+(or tree.json, if that parent is the root and lives there). changed fields
+are written onto the existing node. deleted ids are removed, and so are
+descendants whose parent was removed. The passphrase is not involved:
+this tool only sees plaintext you already have on disk.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+CORE = ("id", "title", "parentId", "summary", "text", "docs", "tags", "link", "linkLabel")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def detect_indent(text: str):
+    head = text[:240]
+    if "\n  \"" in head:
+        return 2
+    if "\n \"" in head:
+        return 1
+    if "\n\"" in head:
+        return 0
+    return 2
+
+
+def order_node(node: dict) -> dict:
+    out = {}
+    for key in CORE:
+        if key in ("link", "linkLabel") and not node.get(key):
+            continue
+        if key in node or key in ("id", "title", "parentId", "summary", "text", "docs", "tags"):
+            value = node.get(key, [] if key in ("docs", "tags") else ("" if key != "parentId" else None))
+            out[key] = value
+    for key, value in node.items():
+        if key not in out:
+            out[key] = value
+    return out
+
+
+def load_file(path: Path):
+    text = path.read_text(encoding="utf-8")
+    data = json.loads(text)
+    if isinstance(data, list):
+        return {"_list": True, "nodes": data, "_indent": detect_indent(text), "_text": text}
+    if isinstance(data, dict) and isinstance(data.get("nodes"), list):
+        data["_indent"] = detect_indent(text)
+        data["_text"] = text
+        return data
+    return None
+
+
+def load_targets(target: Path):
+    if target.is_file():
+        data = load_file(target)
+        if data is None:
+            die(f"{target} has no nodes array")
+        return [(target, data)]
+    if not target.is_dir():
+        die(f"Not a file or directory: {target}")
+    files = []
+    names = sorted(p.name for p in target.glob("*.json") if p.name != "index.json" and not p.name.endswith(".enc.json"))
+    names.sort(key=lambda name: (name != "tree.json", name))
+    for name in names:
+        data = load_file(target / name)
+        if data is not None:
+            files.append((target / name, data))
+    if not files:
+        die(f"No branch JSON files in {target}")
+    return files
+
+
+def main(argv: list[str]) -> None:
+    dry = "--dry-run" in argv
+    args = [a for a in argv if a != "--dry-run"]
+    if len(args) != 2:
+        die("usage: merge_edits edits.json <plaintext-dir-or-file> [--dry-run]", 2)
+    edits_path, target = Path(args[0]), Path(args[1])
+    try:
+        edits = json.loads(edits_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        die(f"Could not read edits: {exc}")
+    if not isinstance(edits, dict):
+        die("Edits file must be a JSON object")
+    added = edits.get("added") or []
+    changed = edits.get("changed") or {}
+    deleted = edits.get("deleted") or []
+    if not isinstance(added, list) or not isinstance(changed, dict) or not isinstance(deleted, list):
+        die("Edits file must contain added (list), changed (object), deleted (list)")
+
+    files = load_targets(target)
+    by_id: dict[str, tuple[dict, dict]] = {}
+    for _path, data in files:
+        for node in data["nodes"]:
+            if isinstance(node, dict) and node.get("id"):
+                by_id[str(node["id"])] = (data, node)
+    snapshots = {id(data): json.dumps(data["nodes"], ensure_ascii=False, sort_keys=True) for _path, data in files}
+
+    updated = 0
+    missing = []
+    for nid, patch in changed.items():
+        if not isinstance(patch, dict):
+            continue
+        found = by_id.get(str(nid))
+        if not found:
+            missing.append(str(nid))
+            continue
+        found[1].update(patch)
+        updated += 1
+
+    pending = []
+    for item in added:
+        if isinstance(item, dict) and item.get("id"):
+            pending.append(order_node(item))
+    inserted = 0
+    guard = 0
+    while pending and guard < len(pending) + 2:
+        guard += 1
+        next_pending = []
+        progress = False
+        for node in pending:
+            nid = str(node["id"])
+            if nid in by_id:
+                by_id[nid][1].update({k: v for k, v in node.items() if k != "id"})
+                updated += 1
+                progress = True
+                continue
+            parent = node.get("parentId")
+            home = None
+            if parent and parent in by_id:
+                home = by_id[parent][0]
+            elif any(str(n.get("id")) == str(parent) for n in pending):
+                next_pending.append(node)
+                continue
+            else:
+                home = next((data for _p, data in files if _p.name == "tree.json"), files[0][1])
+            home["nodes"].append(node)
+            by_id[nid] = (home, node)
+            inserted += 1
+            progress = True
+        pending = next_pending
+        if not progress:
+            break
+    for node in pending:
+        files[0][1]["nodes"].append(node)
+        by_id[str(node["id"])] = (files[0][1], node)
+        inserted += 1
+
+    dead = {str(i) for i in deleted}
+    grew = True
+    while grew:
+        grew = False
+        for node in list(by_id.values()):
+            body = node[1]
+            parent = body.get("parentId")
+            if str(body.get("id")) not in dead and parent and str(parent) in dead:
+                dead.add(str(body.get("id")))
+                grew = True
+
+    removed = 0
+    for _path, data in files:
+        before = len(data["nodes"])
+        data["nodes"] = [n for n in data["nodes"] if str(n.get("id")) not in dead]
+        removed += before - len(data["nodes"])
+
+    print(f"updated {updated}, inserted {inserted}, removed {removed}")
+    if missing:
+        print(f"warning: {len(missing)} changed ids were not in the master files")
+    if dry:
+        print("dry run, nothing written")
+        return
+    if updated == 0 and inserted == 0 and removed == 0:
+        print("no changes")
+        return
+    for path, data in files:
+        indent = data.pop("_indent", 2)
+        data.pop("_text", None)
+        listing = data.pop("_list", False)
+        if json.dumps(data["nodes"], ensure_ascii=False, sort_keys=True) == snapshots[id(data)]:
+            continue
+        payload = data["nodes"] if listing else data
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=indent) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        print(f"wrote {path}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
