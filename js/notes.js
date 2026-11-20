@@ -117,3 +117,14 @@ export function renderNotes(text) {
   }
   return sections.map(renderSection).join("");
 }
+
+export const EXPANDED_LABEL = "Expanded explanation (added by Grokimus)";
+
+/** Depth panel body: the owner's own notes first, then the separately labelled expanded explanation. */
+export function renderDepth(node) {
+  let html = node.text ? renderNotes(node.text) : "";
+  if (node.expanded && String(node.expanded).trim()) {
+    html += `<section class="expanded-block"><div class="expanded-label">${escapeHtml(EXPANDED_LABEL)}</div>${renderNotes(node.expanded)}</section>`;
+  }
+  return html;
+}

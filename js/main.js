@@ -27,7 +27,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "./model.js";
-import { escapeHtml, renderNotes } from "./notes.js";
+import { escapeHtml, renderDepth } from "./notes.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -596,6 +596,7 @@ function renderPanel() {
       <label class="field">Title<input id="f-title" value="${escapeHtml(node.title)}"></label>
       <label class="field">Summary<textarea id="f-summary" rows="3">${escapeHtml(node.summary)}</textarea></label>
       <label class="field">Notes<textarea id="f-text" rows="12">${escapeHtml(node.text)}</textarea></label>
+      <label class="field">Expanded explanation <span class="hint-text">added by Grokimus; yours to edit</span><textarea id="f-expanded" rows="10">${escapeHtml(node.expanded || "")}</textarea></label>
       <p class="hint-text">Lines that start with @@ name a source. ### is a heading, “- ” is a bullet, and “| a | b |” is a table.</p>
       <label class="field">Sources <span class="hint-text">codes, comma separated</span><input id="f-docs" value="${escapeHtml((node.docs || []).join(", "))}"></label>
       <label class="field">Tags<input id="f-tags" value="${escapeHtml((node.tags || []).join(", "))}"></label>
@@ -603,7 +604,7 @@ function renderPanel() {
     return;
   }
 
-  const more = node.text
+  const more = (node.text || node.expanded)
     ? `<button type="button" class="depth-btn" data-act="depth" aria-expanded="${state.depthOpen ? "true" : "false"}">${state.depthOpen ? "Hide depth" : "More depth"}</button>
        <div id="depth-body" class="notes" ${state.depthOpen ? "" : "hidden"}></div>`
     : "";
@@ -628,9 +629,9 @@ function renderPanel() {
       ${id === state.index.rootId ? "" : `<button type="button" data-act="move">Move</button><button type="button" class="danger" data-act="delete">Delete</button>`}
     </div>`;
 
-  if (state.depthOpen && node.text) {
+  if (state.depthOpen && (node.text || node.expanded)) {
     const box = $("depth-body");
-    if (box) box.innerHTML = renderNotes(node.text);
+    if (box) box.innerHTML = renderDepth(node);
   }
 }
 
@@ -647,6 +648,7 @@ function saveForm() {
     title: $("f-title").value.trim() || "Untitled",
     summary: $("f-summary").value.trim(),
     text: $("f-text").value,
+    expanded: $("f-expanded") ? $("f-expanded").value : node.expanded || "",
     docs: readList($("f-docs").value),
     tags: readList($("f-tags").value),
   };
@@ -948,7 +950,7 @@ function onPanelClick(e) {
     const box = $("depth-body");
     const node = state.index.byId.get(state.selected);
     if (state.depthOpen && box && node && !box.dataset.ready) {
-      box.innerHTML = renderNotes(node.text);
+      box.innerHTML = renderDepth(node);
       box.dataset.ready = "1";
     }
     if (box) box.hidden = !state.depthOpen;

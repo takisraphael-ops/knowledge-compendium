@@ -306,6 +306,23 @@ header {
   color: #3e534f;
   margin-bottom: 8px;
 }
+.expanded-block {
+  background: #f1f6f5;
+  border: 1px solid #d3e3e0;
+  border-left: 3px solid var(--teal);
+  border-radius: 12px;
+  padding: 10px 12px 4px;
+  margin: 0 0 12px;
+}
+.expanded-label {
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 750;
+  color: var(--teal);
+  margin-bottom: 8px;
+}
 .table-wrap { overflow-x: auto; margin: 0 0 0.8em; }
 .notes table { border-collapse: collapse; width: 100%; font-family: var(--sans); font-size: 13.5px; line-height: 1.35; }
 .notes th, .notes td { border: 1px solid #e3dcd0; padding: 6px 8px; vertical-align: top; text-align: left; }
