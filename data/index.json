@@ -12,8 +12,48 @@
       "file": "tree.enc.json"
     },
     {
+      "id": "biology",
+      "file": "biology.enc.json"
+    },
+    {
+      "id": "computing",
+      "file": "computing.enc.json"
+    },
+    {
       "id": "cybersecurity",
       "file": "cybersecurity.enc.json"
+    },
+    {
+      "id": "economics",
+      "file": "economics.enc.json"
+    },
+    {
+      "id": "hardware",
+      "file": "hardware.enc.json"
+    },
+    {
+      "id": "history",
+      "file": "history.enc.json"
+    },
+    {
+      "id": "language",
+      "file": "language.enc.json"
+    },
+    {
+      "id": "learning",
+      "file": "learning.enc.json"
+    },
+    {
+      "id": "logic",
+      "file": "logic.enc.json"
+    },
+    {
+      "id": "mathematics",
+      "file": "mathematics.enc.json"
+    },
+    {
+      "id": "networking",
+      "file": "networking.enc.json"
     }
   ]
 }
