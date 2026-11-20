@@ -27,7 +27,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "./model.js";
-import { escapeHtml, renderDepth } from "./notes.js";
+import { escapeHtml, renderDepth, renderFullNotes, FULL_NOTES_LABEL } from "./notes.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -99,6 +99,8 @@ const state = {
   selected: null,
   editing: false,
   depthOpen: false,
+  fullNotesOpen: false,
+  sections: {},
   query: "",
   hits: [],
   hitCursor: 0,
@@ -380,6 +382,7 @@ function select(id, { toggle = false } = {}) {
   state.selected = id;
   state.editing = false;
   state.depthOpen = false;
+  state.fullNotesOpen = false;
   for (const a of ancestorIds(state.index, id)) state.expanded.add(a);
   const kids = visibleKids(id);
   if (toggle && kids.length && id !== state.index.rootId) {
@@ -548,6 +551,19 @@ const DOC_ORDER = {
   CS: 1, CT: 1, GC: 1, CY: 1, NM: 1, GG: 1, G1: 1, ME: 1, OV: 1, TB: 1,
 };
 
+
+function sectionsOf(node) {
+  const ids = node?.sectionIds || [];
+  return ids.map((id) => state.sections[id]).filter(Boolean);
+}
+
+function fillFullNotes(node) {
+  const body = $("full-notes-body");
+  if (!body || body.dataset.ready === "1") return;
+  body.innerHTML = renderFullNotes(sectionsOf(node), node, docLabel);
+  body.dataset.ready = "1";
+}
+
 function renderPanel() {
   const id = state.selected;
   if (!id || !state.index.byId.has(id)) {
@@ -608,6 +624,13 @@ function renderPanel() {
     ? `<button type="button" class="depth-btn" data-act="depth" aria-expanded="${state.depthOpen ? "true" : "false"}">${state.depthOpen ? "Hide depth" : "More depth"}</button>
        <div id="depth-body" class="notes" ${state.depthOpen ? "" : "hidden"}></div>`
     : "";
+  const fullSecs = sectionsOf(node);
+  const fullNotes = fullSecs.length
+    ? `<details class="full-notes" ${state.fullNotesOpen ? "open" : ""}>
+         <summary>${escapeHtml(FULL_NOTES_LABEL)}</summary>
+         <div id="full-notes-body" class="full-notes-body notes"></div>
+       </details>`
+    : "";
 
   els.panel.innerHTML = `
     <div class="panel-top" style="--c:${branchColor(id)}">
@@ -622,6 +645,7 @@ function renderPanel() {
     ${link}
     ${docs || tags ? `<div class="chips">${docs}${tags}</div>` : ""}
     ${more}
+    ${fullNotes}
     ${kidLinks ? `<h2 class="subhead">Subtopics</h2><div class="subtopics">${kidLinks}</div>` : ""}
     <div class="row-actions">
       <button type="button" data-act="edit">Edit</button>
@@ -633,6 +657,7 @@ function renderPanel() {
     const box = $("depth-body");
     if (box) box.innerHTML = renderDepth(node);
   }
+  if (state.fullNotesOpen && fullSecs.length) fillFullNotes(node);
 }
 
 function readList(value) {
@@ -1092,6 +1117,15 @@ function wireCamera() {
 
 function wireChrome() {
   els.panel.addEventListener("click", onPanelClick);
+  els.panel.addEventListener("toggle", (e) => {
+    const det = e.target.closest?.("details.full-notes");
+    if (!det || !els.panel.contains(det)) return;
+    state.fullNotesOpen = det.open;
+    if (det.open) {
+      const node = state.index.byId.get(state.selected);
+      if (node) fillFullNotes(node);
+    }
+  }, true);
   els.modal.addEventListener("click", onModalClick);
   els.search.addEventListener("input", () => {
     state.query = els.search.value;
@@ -1275,6 +1309,9 @@ async function openCompendium(key) {
     const data = await decryptJson(key, payload, branch.id);
     const list = Array.isArray(data) ? data : data.nodes;
     if (!Array.isArray(list)) throw new Error(`${branch.file} has no nodes`);
+    if (data && !Array.isArray(data) && data.sections && typeof data.sections === "object") {
+      Object.assign(state.sections, data.sections);
+    }
     for (const node of list) nodes.push(node);
   }
   state.key = key;
@@ -1298,6 +1335,7 @@ async function openCompendium(key) {
 function lock() {
   state.key = null;
   state.baseNodes = [];
+  state.sections = {};
   state.index = null;
   state.selected = null;
   state.editing = false;

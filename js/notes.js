@@ -128,3 +128,124 @@ export function renderDepth(node) {
   }
   return html;
 }
+
+export const FULL_NOTES_LABEL = "Full notes (from your original document)";
+
+function normWs(s) {
+  return String(s || "")
+    .replace(/[\u200b\u200c\u200d\ufeff]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function ownHaystack(node, doc) {
+  const text = String(node?.text || "");
+  if (!text.trim()) return "";
+  const parts = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks = [{ doc: "", lines: [] }];
+  for (const line of parts) {
+    const mark = line.match(/^\s*@@\s*(.*)$/);
+    if (mark) blocks.push({ doc: mark[1].trim().toLowerCase(), lines: [] });
+    else blocks[blocks.length - 1].lines.push(line);
+  }
+  const wanted = (doc || "").toLowerCase();
+  const chosen = [];
+  for (const b of blocks) {
+    if (!wanted || !b.doc || b.doc.includes(wanted) || wanted.includes(b.doc.slice(0, 12))) {
+      chosen.push(b.lines.join("\n"));
+    }
+  }
+  const body = (chosen.length ? chosen : [text]).join("\n");
+  return normWs(body).toLowerCase();
+}
+
+function shouldHighlightLine(line, hay) {
+  const n = normWs(line);
+  if (n.length < 32 || !hay) return false;
+  return hay.includes(n.slice(0, 80).toLowerCase());
+}
+
+/** Render a stored source section, highlighting the topic's own passage when it is only part of the section. */
+export function renderFullNotes(sections, node, docLabel) {
+  if (!sections || !sections.length) return "";
+  return sections.map((sec) => {
+    const name = docLabel ? docLabel(sec.doc) : sec.doc;
+    const title = sec.title ? ` — ${sec.title}` : "";
+    const hay = ownHaystack(node, name || sec.doc);
+    const lines = String(sec.text || "").replace(/\r\n/g, "\n").split("\n");
+    const marks = new Set();
+    if (hay.length >= 32) {
+      lines.forEach((ln, i) => { if (shouldHighlightLine(ln, hay)) marks.add(i); });
+    }
+    const usable = marks.size > 0 && marks.size < Math.max(3, Math.floor(lines.length * 0.8));
+    const body = usable ? renderNotesHighlighted(lines, marks) : renderNotes(sec.text);
+    const hint = usable
+      ? `<p class="full-notes-hint">Highlighted text is the passage this topic was taken from.</p>`
+      : "";
+    return `<section class="full-notes-section"><div class="full-notes-doc">${escapeHtml(name || "Source")}${escapeHtml(title)}</div>${hint}${body}</section>`;
+  }).join("");
+}
+
+function renderNotesHighlighted(lines, marks) {
+  return renderBlocksHighlighted(lines, marks);
+}
+
+function wrapInline(s, on) {
+  const inner = inline(s);
+  return on ? `<mark class="own-passage">${inner}</mark>` : inner;
+}
+
+function renderBlocksHighlighted(lines, marks) {
+  const html = [];
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    if (!trimmed) { i++; continue; }
+    const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const tag = heading[1].length >= 4 ? "h4" : "h3";
+      html.push(`<${tag}>${inline(heading[2])}</${tag}>`);
+      i++;
+      continue;
+    }
+    if (trimmed.startsWith("|")) {
+      const rows = [];
+      const start = i;
+      while (i < lines.length && lines[i].trim().startsWith("|")) { rows.push(lines[i]); i++; }
+      const table = renderTable(rows.map((r) => {
+        let s = r.trim();
+        if (s.startsWith("|")) s = s.slice(1);
+        if (s.endsWith("|")) s = s.slice(0, -1);
+        return s.split("|").map((c) => c.trim());
+      }));
+      const on = Array.from({ length: i - start }, (_, k) => marks.has(start + k)).some(Boolean);
+      html.push(on ? `<div class="own-passage-block">${table}</div>` : table);
+      continue;
+    }
+    if (/^[-*•–]\s+/.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && /^[-*•–]\s+/.test(lines[i].trim())) {
+        const on = marks.has(i);
+        items.push(`<li>${wrapInline(lines[i].trim().replace(/^[-*•–]\s+/, ""), on)}</li>`);
+        i++;
+      }
+      html.push(`<ul>${items.join("")}</ul>`);
+      continue;
+    }
+    const numbered = /^(?:\d+)\.(?:[✓✔]\s*|\s+)(.*)$/;
+    if (numbered.test(trimmed)) {
+      const items = [];
+      while (i < lines.length && numbered.test(lines[i].trim())) {
+        const on = marks.has(i);
+        items.push(`<li>${wrapInline(lines[i].trim().match(numbered)[1], on)}</li>`);
+        i++;
+      }
+      html.push(`<ol>${items.join("")}</ol>`);
+      continue;
+    }
+    html.push(`<p>${wrapInline(trimmed, marks.has(i))}</p>`);
+    i++;
+  }
+  return html.join("");
+}

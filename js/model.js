@@ -40,6 +40,9 @@ export function normalizeNode(raw) {
   };
   if (n.link) node.link = String(n.link);
   if (n.linkLabel) node.linkLabel = String(n.linkLabel);
+  const sids = Array.isArray(n.sectionIds) ? n.sectionIds.map(String).filter(Boolean)
+    : (n.sectionId ? [String(n.sectionId)] : []);
+  if (sids.length) node.sectionIds = sids;
   return node;
 }
 
