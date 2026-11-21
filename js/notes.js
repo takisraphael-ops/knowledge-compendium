@@ -52,6 +52,32 @@ function renderTable(rows) {
   return `<div class="table-wrap"><table>${headHtml}${bodyHtml}</table></div>`;
 }
 
+
+function studyCalloutKind(title) {
+  const t = String(title || "").replace(/[:.]+$/, "").trim();
+  if (/^exam tips?$/i.test(t)) return "exam";
+  if (/^memory aids?$/i.test(t)) return "memory";
+  return "";
+}
+
+function wrapStudyCallout(kind, innerHtml) {
+  const label = kind === "exam" ? "Exam tips" : "Memory aids";
+  return `<section class="study-callout study-callout-${kind}"><div class="study-callout-label">${label}</div>${innerHtml}</section>`;
+}
+
+function collectUntilHeading(lines, start, level) {
+  const inner = [];
+  let i = start;
+  while (i < lines.length) {
+    const t = lines[i].trim();
+    const h = t.match(/^(#{1,6})\s+/);
+    if (h && h[1].length <= level) break;
+    inner.push(lines[i]);
+    i++;
+  }
+  return { inner, next: i };
+}
+
 function renderBlocks(lines) {
   const html = [];
   let i = 0;
@@ -63,6 +89,13 @@ function renderBlocks(lines) {
     }
     const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
+      const kind = studyCalloutKind(heading[2]);
+      if (kind) {
+        const { inner, next } = collectUntilHeading(lines, i + 1, heading[1].length);
+        html.push(wrapStudyCallout(kind, renderBlocks(inner)));
+        i = next;
+        continue;
+      }
       const tag = heading[1].length >= 4 ? "h4" : "h3";
       html.push(`<${tag}>${inline(heading[2])}</${tag}>`);
       i++;
@@ -234,6 +267,16 @@ function renderBlocksHighlighted(lines, marks) {
     if (!trimmed) { i++; continue; }
     const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
+      const kind = studyCalloutKind(heading[2]);
+      if (kind) {
+        const start = i + 1;
+        const { inner, next } = collectUntilHeading(lines, start, heading[1].length);
+        const shifted = new Set();
+        for (const idx of marks) if (idx >= start && idx < next) shifted.add(idx - start);
+        html.push(wrapStudyCallout(kind, renderBlocksHighlighted(inner, shifted)));
+        i = next;
+        continue;
+      }
       const tag = heading[1].length >= 4 ? "h4" : "h3";
       html.push(`<${tag}>${inline(heading[2])}</${tag}>`);
       i++;

@@ -347,6 +347,36 @@ h1 .added-badge { font-weight: 700; }
 .notes p { margin: 0 0 0.7em; }
 .notes h3, .notes h4 { font-family: var(--sans); letter-spacing: -0.01em; margin: 1em 0 0.35em; }
 .notes h3 { font-size: 1.02rem; }
+.study-callout {
+  border: 1px solid #e6e0d6;
+  border-radius: 12px;
+  padding: 10px 14px 8px;
+  margin: 1.1em 0 1.2em;
+  max-width: 42rem;
+}
+.study-callout > .study-callout-label {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin: 0 0 8px;
+}
+.study-callout > h3, .study-callout > .study-callout-label + h3 { display: none; }
+.study-callout p:last-child, .study-callout ul:last-child, .study-callout ol:last-child, .study-callout .table-wrap:last-child { margin-bottom: 0.2em; }
+.study-callout-exam {
+  background: #f3f8f7;
+  border-color: #d3e3e0;
+  border-left: 3px solid var(--teal);
+}
+.study-callout-exam > .study-callout-label { color: var(--teal); }
+.study-callout-memory {
+  background: #fbf6ea;
+  border-color: #ead9b0;
+  border-left: 3px solid #b08900;
+}
+.study-callout-memory > .study-callout-label { color: #7a5d00; }
+
 .notes h4 { font-size: 0.95rem; color: #24343a; }
 .notes ul, .notes ol { margin: 0 0 0.75em; padding-left: 1.2em; }
 .notes li { margin: 0.18em 0; }
