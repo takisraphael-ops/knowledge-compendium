@@ -77,6 +77,7 @@ const els = {
   edges: $("edges"),
   nodes: $("nodes"),
   panel: $("panel"),
+  panelResizer: $("panel-resizer"),
   zoomLabel: $("zoom-label"),
   hint: $("hint"),
   modal: $("modal"),
@@ -1150,7 +1151,119 @@ function wireCamera() {
   );
 }
 
+
+const PANEL_WIDTH_KEY = "kc-panel-width";
+const PANEL_DESKTOP = "(min-width: 861px)";
+
+function isDesktopPanel() {
+  return window.matchMedia(PANEL_DESKTOP).matches;
+}
+
+function panelWidthBounds() {
+  const vw = window.innerWidth;
+  const min = 360;
+  const max = Math.max(min, Math.min(Math.round(vw * 0.75), vw - 280));
+  return { min, max };
+}
+
+function clampPanelWidth(px) {
+  const { min, max } = panelWidthBounds();
+  return Math.round(Math.min(max, Math.max(min, px)));
+}
+
+function defaultPanelWidth() {
+  const vw = window.innerWidth;
+  return clampPanelWidth(Math.max(640, vw * 0.54));
+}
+
+function applyPanelWidth(px, { persist = false } = {}) {
+  const width = clampPanelWidth(px);
+  document.documentElement.style.setProperty("--panel-width", `${width}px`);
+  if (els.panelResizer) {
+    els.panelResizer.hidden = !isDesktopPanel();
+    els.panelResizer.setAttribute("aria-valuenow", String(width));
+    els.panelResizer.setAttribute("aria-valuemin", String(panelWidthBounds().min));
+    els.panelResizer.setAttribute("aria-valuemax", String(panelWidthBounds().max));
+  }
+  if (persist) {
+    try { localStorage.setItem(PANEL_WIDTH_KEY, String(width)); } catch { /* ignore */ }
+  }
+  return width;
+}
+
+function readStoredPanelWidth() {
+  try {
+    const n = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    if (Number.isFinite(n) && n >= 300) return n;
+  } catch { /* ignore */ }
+  return null;
+}
+
+function initPanelWidth() {
+  if (!isDesktopPanel()) {
+    if (els.panelResizer) els.panelResizer.hidden = true;
+    return;
+  }
+  const stored = readStoredPanelWidth();
+  applyPanelWidth(stored ?? defaultPanelWidth(), { persist: false });
+}
+
+function wirePanelResize() {
+  const handle = els.panelResizer;
+  if (!handle) return;
+  handle.setAttribute("aria-valuetext", "Notes panel width");
+  initPanelWidth();
+
+  let drag = null;
+  handle.addEventListener("pointerdown", (e) => {
+    if (!isDesktopPanel() || e.button) return;
+    const startW = els.panel.getBoundingClientRect().width;
+    drag = { x: e.clientX, w: startW, id: e.pointerId };
+    handle.setPointerCapture(e.pointerId);
+    document.body.classList.add("panel-resizing");
+    e.preventDefault();
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    // Handle is on the left edge: dragging left (smaller clientX) widens the panel.
+    applyPanelWidth(drag.w + (drag.x - e.clientX));
+  });
+  const end = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const width = applyPanelWidth(els.panel.getBoundingClientRect().width, { persist: true });
+    drag = null;
+    document.body.classList.remove("panel-resizing");
+    if (!state.userMoved) fit();
+    void width;
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+  handle.addEventListener("keydown", (e) => {
+    if (!isDesktopPanel()) return;
+    const step = e.shiftKey ? 48 : 16;
+    const cur = els.panel.getBoundingClientRect().width;
+    let next = cur;
+    if (e.key === "ArrowLeft") next = cur + step;
+    else if (e.key === "ArrowRight") next = cur - step;
+    else if (e.key === "Home") next = panelWidthBounds().max;
+    else if (e.key === "End") next = panelWidthBounds().min;
+    else return;
+    e.preventDefault();
+    applyPanelWidth(next, { persist: true });
+    if (!state.userMoved) fit();
+  });
+  window.addEventListener("resize", () => {
+    if (!isDesktopPanel()) {
+      handle.hidden = true;
+      return;
+    }
+    const stored = readStoredPanelWidth();
+    applyPanelWidth(stored ?? (els.panel.getBoundingClientRect().width || defaultPanelWidth()));
+  });
+}
+
 function wireChrome() {
+  wirePanelResize();
   els.panel.addEventListener("click", onPanelClick);
   els.panel.addEventListener("toggle", (e) => {
     const det = e.target.closest?.("details.full-notes");
