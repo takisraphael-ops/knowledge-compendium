@@ -12,7 +12,10 @@ function inline(s) {
   let t = escapeHtml(s);
   t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
   t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  t = t.replace(/https?:\/\/[^\s<]+/g, (m) => {
+  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, label, url) => {
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+  t = t.replace(/(?<!href=")https?:\/\/[^\s<]+/g, (m) => {
     const trail = m.match(/[),.;:]+$/)?.[0] || "";
     const core = trail ? m.slice(0, -trail.length) : m;
     return `<a href="${core}" target="_blank" rel="noopener noreferrer">${core}</a>${trail}`;

@@ -596,7 +596,7 @@ function renderPanel() {
   const docs = (node.docs || [])
     .map((d) => `<button type="button" class="chip" data-act="filter-doc" data-doc="${escapeHtml(d)}">${escapeHtml(docLabel(d))}</button>`)
     .join("");
-  const tags = (node.tags || []).map((t) => `<span class="chip quiet">${escapeHtml(t)}</span>`).join("");
+  const tags = (node.tags || []).filter((t) => t !== "grokimus-added").map((t) => `<span class="chip quiet">${escapeHtml(t)}</span>`).join("");
   const url = safeUrl(node.link);
   const link = url
     ? `<p class="outlink"><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(node.linkLabel || url)}</a></p>`
@@ -624,8 +624,14 @@ function renderPanel() {
     return;
   }
 
+  const ownNotes = String(node.tidy || "").trim() || String(node.text || "").trim();
+  const hasExpanded = Boolean(String(node.expanded || "").trim());
+  const grokimusAdded = (node.tags || []).includes("grokimus-added");
+  const grokBadge = grokimusAdded
+    ? `<span class="added-badge">Added by Grokimus</span>`
+    : "";
   const canToggle = hasOriginalToggle(node);
-  const yourNotes = (node.tidy || node.text)
+  const yourNotes = ownNotes
     ? `<section class="your-notes">
          <div class="your-notes-bar">
            <div class="your-notes-label">${escapeHtml(YOUR_NOTES_LABEL)}</div>
@@ -634,9 +640,13 @@ function renderPanel() {
          <div id="your-notes-body" class="notes"></div>
        </section>`
     : "";
-  const more = (node.expanded && String(node.expanded).trim())
-    ? `<button type="button" class="depth-btn" data-act="depth" aria-expanded="${state.depthOpen ? "true" : "false"}">${state.depthOpen ? "Hide depth" : "More depth"}</button>
-       <div id="depth-body" class="notes" ${state.depthOpen ? "" : "hidden"}></div>`
+  // If there is no owner text, show the Grokimus expansion in the open, not behind "More depth".
+  const expandInOpen = hasExpanded && !ownNotes;
+  const more = hasExpanded
+    ? (expandInOpen
+      ? `<div id="depth-body" class="notes grokimus-open"></div>`
+      : `<button type="button" class="depth-btn" data-act="depth" aria-expanded="${state.depthOpen ? "true" : "false"}">${state.depthOpen ? "Hide depth" : "More depth"}</button>
+       <div id="depth-body" class="notes" ${state.depthOpen ? "" : "hidden"}></div>`)
     : "";
   const fullSecs = sectionsOf(node);
   const fullNotes = fullSecs.length
@@ -652,7 +662,7 @@ function renderPanel() {
         <button type="button" class="icon-btn" data-act="close-panel" aria-label="Close">×</button>
         <div class="crumbs">${crumbHtml}</div>
       </div>
-      <h1>${escapeHtml(node.title)}</h1>
+      <h1>${escapeHtml(node.title)}${grokBadge}</h1>
     </div>
     ${hiddenNote}${orphanNote}
     ${node.summary ? `<p class="summary">${escapeHtml(node.summary)}</p>` : ""}
@@ -670,7 +680,7 @@ function renderPanel() {
 
   const notesBody = $("your-notes-body");
   if (notesBody) notesBody.innerHTML = renderYourNotes(node, state.showOriginal);
-  if (state.depthOpen && node.expanded && String(node.expanded).trim()) {
+  if ((expandInOpen || state.depthOpen) && hasExpanded) {
     const box = $("depth-body");
     if (box) box.innerHTML = renderDepth(node);
   }
