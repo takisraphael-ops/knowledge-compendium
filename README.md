@@ -14,7 +14,21 @@ python3 -m http.server 8734
 
 Open `http://127.0.0.1:8734`. The page must be served over HTTP. Opening the HTML file directly cannot fetch the catalog. Unlock with your passphrase.
 
-Drag to pan, scroll or pinch to zoom. Click a topic to open it and, when it has children, to expand or collapse that branch. Double-click expands the whole branch. **Expand all** and **Collapse all** sit at the lower left.
+The home screen is an overview of the root and each subject branch (Cybersecurity, Networking, Hardware, and the rest), with a topic count on every subject. Click or tap a subject to open it as its own mind map, containing only that branch's topics. Drag to pan, scroll or pinch to zoom. In a subject map, click a topic to open its notes and, when it has children, to expand or collapse that branch. Double-click expands the whole branch. **Expand all** and **Collapse all** sit at the lower left of a subject map.
+
+### Finding your place
+
+- The breadcrumb **Home › Subject › …** steps back to the overview or to a parent. A heading with children can also be opened as its own focused map from the breadcrumb.
+- The subject menu in the header jumps between subjects, or back to the overview.
+- Deep links use the URL hash, so the browser back button and a refresh keep your place:
+  - `#/` — overview
+  - `#/networking` — that subject's map
+  - `#/networking/nrt-ospf` — the same map with that topic selected and the notes panel open
+  - `#/networking/nrt/` — a map focused on a sub-branch (note the trailing slash)
+- Older links of the form `#nrt-ospf` or `#c206` still work: they redirect into the subject path.
+- Search looks across every subject, then opens the right map, selects the topic, and shows the notes panel. Title matches are listed first.
+
+The browser decrypts the catalog once so search can run across everything, but only the active map's nodes are drawn.
 
 ## How a catalog is laid out
 
