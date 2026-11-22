@@ -32,20 +32,28 @@
 
   <div id="app" hidden>
     <header>
-      <div class="brand" id="brand">Knowledge Compendium</div>
-      <div class="count" id="count"></div>
-      <div class="search-wrap">
-        <input id="search" type="search" placeholder="Search topics" aria-label="Search topics" autocomplete="off">
-        <div class="match-nav">
-          <span id="match-label"></span>
-          <button type="button" id="match-prev" aria-label="Previous match">‹</button>
-          <button type="button" id="match-next" aria-label="Next match">›</button>
+      <nav class="nav-line" id="nav-line" aria-label="Map location">
+        <ol class="map-breadcrumb" id="map-breadcrumb"></ol>
+        <label class="subject-switch-wrap">
+          <select id="subject-switch" aria-label="Switch subject"></select>
+        </label>
+      </nav>
+      <div class="chrome-line">
+        <div class="brand" id="brand">Knowledge Compendium</div>
+        <div class="count" id="count"></div>
+        <div class="search-wrap">
+          <input id="search" type="search" placeholder="Search topics" aria-label="Search topics" autocomplete="off">
+          <div class="match-nav">
+            <span id="match-label"></span>
+            <button type="button" id="match-prev" aria-label="Previous match">‹</button>
+            <button type="button" id="match-next" aria-label="Next match">›</button>
+          </div>
         </div>
-      </div>
-      <div class="tools">
-        <select id="doc-filter" aria-label="Filter by source document"></select>
-        <button type="button" class="tool" id="edits-btn">Edits</button>
-        <button type="button" class="tool" id="lock-btn">Lock</button>
+        <div class="tools">
+          <select id="doc-filter" aria-label="Filter by source document"></select>
+          <button type="button" class="tool" id="edits-btn">Edits</button>
+          <button type="button" class="tool" id="lock-btn">Lock</button>
+        </div>
       </div>
       <div id="edits-menu" class="menu" hidden></div>
     </header>
@@ -66,7 +74,7 @@
         <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
         <button type="button" id="fit">Fit</button>
       </div>
-      <p id="hint">Drag to pan. Pinch or scroll to zoom. Tap a topic to open it.</p>
+      <p id="hint">Drag to pan. Pinch or scroll to zoom. Tap a subject to open its map.</p>
       <div id="panel-resizer" role="separator" aria-orientation="vertical" aria-label="Resize notes panel" tabindex="0" hidden></div>
       <aside id="panel" aria-label="Topic"></aside>
     </div>

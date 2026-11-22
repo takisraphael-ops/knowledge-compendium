@@ -11,6 +11,14 @@ import {
 } from "./crypto.js";
 import { layoutMap, assignSides } from "./layout.js";
 import {
+  formatHash,
+  parseHash,
+  subjectOfNode,
+  isUnder,
+  sortSubjects,
+  slugifyTitle,
+} from "./route.js";
+import {
   ancestorIds,
   buildIndex,
   diffNode,
@@ -65,6 +73,8 @@ const els = {
   forgetBtn: $("forget-saved"),
   app: $("app"),
   brand: $("brand"),
+  breadcrumb: $("map-breadcrumb"),
+  subjectSwitch: $("subject-switch"),
   count: $("count"),
   search: $("search"),
   matchLabel: $("match-label"),
@@ -112,25 +122,114 @@ const state = {
   cam: { x: 40, y: 40, k: 1 },
   userMoved: false,
   positions: new Map(),
+  mode: "overview",
+  slug: null,
+  focusId: null,
+  subjects: [],
+  nodeBranch: new Map(),
+  viewSides: new Map(),
 };
 
 const nodeButtons = new Map();
 let toastTimer = 0;
 let searchTimer = 0;
 let measureCtx = null;
+let routeApplying = false;
+
+function layoutRoot() {
+  if (!state.index) return null;
+  if (state.mode === "subject" && state.focusId && state.index.byId.has(state.focusId)) {
+    return state.focusId;
+  }
+  return state.index.rootId;
+}
+
+function subjectBySlug(slug) {
+  return state.subjects.find((s) => s.slug === slug) || null;
+}
+
+function topicCountLabel(n) {
+  const count = Number(n) || 0;
+  return count === 1 ? "1 topic" : `${count} topics`;
+}
+
+function subjectCountFor(id) {
+  const found = state.subjects.find((s) => s.rootId === id);
+  if (found) return found.count;
+  return state.index ? subtreeIds(state.index, id).length : 0;
+}
+
+function currentRoute() {
+  const subject = subjectBySlug(state.slug);
+  return {
+    mode: state.mode,
+    slug: state.slug,
+    focusId: state.focusId,
+    selectedId: state.selected,
+    subjectRootId: subject?.rootId || null,
+  };
+}
+
+function normalizeHash(hash) {
+  if (!hash || hash === "#") return "#/";
+  return hash;
+}
+
+function writeRoute({ push = false } = {}) {
+  if (routeApplying || !state.index) return;
+  const hash = formatHash(currentRoute());
+  if (normalizeHash(location.hash) === normalizeHash(hash)) return;
+  if (push) history.pushState(null, "", hash);
+  else history.replaceState(null, "", hash);
+}
+
+function buildSubjects() {
+  if (!state.index) {
+    state.subjects = [];
+    return;
+  }
+  const rootId = state.index.rootId;
+  const kids = state.index.children.get(rootId) || [];
+  const list = [];
+  const used = new Set();
+  for (const id of kids) {
+    const node = state.index.byId.get(id);
+    const branchId = state.nodeBranch.get(id);
+    let slug = branchId && branchId !== "tree" ? branchId : slugifyTitle(node?.title);
+    if (used.has(slug)) slug = `${slug}-${id}`;
+    used.add(slug);
+    list.push({
+      slug,
+      rootId: id,
+      title: node?.title || slug,
+      count: subtreeIds(state.index, id).length,
+      branchId: branchId || null,
+    });
+  }
+  state.subjects = sortSubjects(list);
+}
 
 function measureOf(id) {
   const node = state.index.byId.get(id);
-  const root = id === state.index.rootId;
+  const root = id === layoutRoot();
+  const overviewSubject = state.mode === "overview" && id !== state.index.rootId;
   const kids = visibleKids(id);
-  const badge = !root && kids.length > 0;
+  const badge = !root && !overviewSubject && kids.length > 0;
   const font = root
     ? '600 18px "Liberation Serif", Georgia, serif'
     : '600 14px "Liberation Sans", "Segoe UI", sans-serif';
-  let textW = [...(node?.title || "")].length * (root ? 9 : 7.4);
   if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
   measureCtx.font = font;
-  textW = measureCtx.measureText(node?.title || "").width;
+  const textW = measureCtx.measureText(node?.title || "").width;
+  if (overviewSubject) {
+    const countLabel = topicCountLabel(subjectCountFor(id));
+    measureCtx.font = '600 12px "Liberation Sans", "Segoe UI", sans-serif';
+    const countW = measureCtx.measureText(countLabel).width;
+    return {
+      w: Math.round(Math.min(280, Math.max(140, Math.max(textW, countW) + 36))),
+      h: 54,
+    };
+  }
   const chrome = (root ? 40 : 42) + (badge ? 40 : 0);
   const max = root ? 380 : 260;
   const min = root ? 168 : 108;
@@ -141,6 +240,7 @@ function measureOf(id) {
 }
 
 function visibleKids(id) {
+  if (state.mode === "overview" && id !== state.index.rootId) return [];
   const kids = state.index.children.get(id) || [];
   if (!state.filter) return kids;
   return kids.filter((kid) => state.filter.has(kid));
@@ -161,6 +261,9 @@ function rebuildDerived() {
   state.colors = new Map();
   const level1 = state.index.children.get(state.index.rootId) || [];
   level1.forEach((id, i) => state.colors.set(id, PALETTE[i % PALETTE.length]));
+  buildSubjects();
+  const viewRoot = layoutRoot() || state.index.rootId;
+  state.viewSides = assignSides(viewRoot, state.index.children);
   if (state.selected && !state.index.byId.has(state.selected)) {
     state.selected = null;
     state.editing = false;
@@ -190,26 +293,56 @@ function editedIds() {
 }
 
 function draw() {
-  const rootId = state.index.rootId;
+  const rootId = layoutRoot();
+  const sides = state.viewSides && state.viewSides.size ? state.viewSides : state.sides;
   state.positions = layoutMap({
     rootId,
     children: state.index.children,
     measure: measureOf,
     isOpen: (id) => id === rootId || state.expanded.has(id),
     kidsOf: visibleKids,
-    sides: state.sides,
+    sides,
     colors: state.colors,
   });
   drawEdges();
   drawNodes();
   const shown = state.positions.size;
-  const total = state.index.byId.size;
-  els.count.textContent = state.doc || state.query ? `${shown} shown · ${total} topics` : `${total} topics`;
+  const allTotal = state.index.byId.size;
+  const subject = subjectBySlug(state.slug);
+  const focus = state.mode === "subject" ? (state.focusId || subject?.rootId) : null;
+  const viewTotal = focus ? subtreeIds(state.index, focus).length : allTotal;
+  const subjectN = state.subjects.length;
+  if (state.doc || state.query) {
+    els.count.textContent = `${shown} shown · ${allTotal} topics`;
+  } else if (state.mode === "overview") {
+    els.count.textContent = `${subjectN} subjects · ${allTotal} topics`;
+  } else if (focus && focus !== subject?.rootId) {
+    const title = state.index.byId.get(focus)?.title || "Branch";
+    els.count.textContent = `${title} · ${topicCountLabel(viewTotal)}`;
+  } else {
+    els.count.textContent = topicCountLabel(viewTotal);
+  }
   const n = editCount(state.edits);
   els.editsBtn.textContent = n ? `Edits ${n}` : "Edits";
   els.editsBtn.classList.toggle("has-edits", n > 0);
-  els.panel.classList.toggle("open", Boolean(state.selected));
-  document.body.classList.toggle("panel-open", Boolean(state.selected));
+  const panelOpen = Boolean(state.selected);
+  els.panel.classList.toggle("open", panelOpen);
+  document.body.classList.toggle("panel-open", panelOpen);
+  document.body.classList.toggle("overview-mode", state.mode === "overview");
+  if (els.panelResizer) els.panelResizer.hidden = !isDesktopPanel() || !panelOpen;
+  if (state._panelWasOpen !== panelOpen && !state.userMoved) {
+    requestAnimationFrame(() => { if (!state.userMoved) fit(); });
+  }
+  state._panelWasOpen = panelOpen;
+  updateHint();
+  renderNav();
+}
+
+function updateHint() {
+  if (!els.hint) return;
+  els.hint.textContent = state.mode === "overview"
+    ? "Drag to pan. Pinch or scroll to zoom. Tap a subject to open its map."
+    : "Drag to pan. Pinch or scroll to zoom. Tap a topic to open it.";
 }
 
 function drawEdges() {
@@ -280,10 +413,12 @@ function drawNodes() {
       els.nodes.appendChild(btn);
     }
     const node = state.index.byId.get(id);
-    const root = id === state.index.rootId;
+    const root = id === layoutRoot();
+    const overviewSubject = state.mode === "overview" && id !== state.index.rootId;
     const kids = visibleKids(id);
     const open = state.expanded.has(id);
     btn.classList.toggle("root", root);
+    btn.classList.toggle("overview-subject", overviewSubject);
     btn.classList.toggle("selected", id === state.selected);
     btn.classList.toggle("match", hits.has(id));
     btn.classList.toggle("current", id === current);
@@ -295,12 +430,17 @@ function drawNodes() {
     btn.style.height = `${pos.h}px`;
     btn.style.setProperty("--c", pos.color);
     btn.setAttribute("aria-pressed", id === state.selected ? "true" : "false");
-    btn.title = node.title;
-    const badge = !root && kids.length
+    btn.title = overviewSubject
+      ? `${node.title} · ${topicCountLabel(subjectCountFor(id))}`
+      : node.title;
+    const badge = !root && !overviewSubject && kids.length
       ? `<span class="badge">${open ? "–" : `+${kids.length}`}</span>`
       : "";
     const dot = root ? "" : `<span class="dot" aria-hidden="true"></span>`;
-    const html = `${dot}<span class="label">${highlightTitle(node.title, state.query)}</span>${badge}`;
+    const count = overviewSubject
+      ? `<span class="topic-count">${escapeHtml(topicCountLabel(subjectCountFor(id)))}</span>`
+      : "";
+    const html = `${dot}<span class="label">${highlightTitle(node.title, state.query)}</span>${count}${badge}`;
     if (btn.dataset.html !== html) {
       btn.innerHTML = html;
       btn.dataset.html = html;
@@ -379,8 +519,172 @@ function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
-function select(id, { toggle = false } = {}) {
-  if (!state.index.byId.has(id)) return;
+function applyRoute({ fitMap = false } = {}) {
+  if (!state.index) return;
+  const parsed = parseHash(location.hash, { index: state.index, subjects: state.subjects });
+  if (parsed.legacy) {
+    routeApplying = true;
+    history.replaceState(null, "", formatHash({
+      mode: parsed.mode,
+      slug: parsed.slug,
+      focusId: parsed.focusId,
+      selectedId: parsed.selectedId,
+      subjectRootId: subjectBySlug(parsed.slug)?.rootId || null,
+    }));
+    routeApplying = false;
+  }
+  const prevMode = state.mode;
+  const prevFocus = state.focusId;
+  const prevSlug = state.slug;
+  state.mode = parsed.mode;
+  state.slug = parsed.slug;
+  let focusId = parsed.mode === "overview"
+    ? state.index.rootId
+    : (parsed.focusId || subjectBySlug(parsed.slug)?.rootId || state.index.rootId);
+  const subject = subjectBySlug(state.slug);
+  if (state.mode === "subject" && subject && !isUnder(state.index, subject.rootId, focusId)) {
+    focusId = subject.rootId;
+  }
+  state.focusId = focusId;
+  let selected = parsed.selectedId && state.index.byId.has(parsed.selectedId) ? parsed.selectedId : null;
+  if (selected && state.mode === "subject" && !isUnder(state.index, state.focusId, selected)) {
+    state.focusId = subject?.rootId || state.focusId;
+    if (!isUnder(state.index, state.focusId, selected)) selected = null;
+  }
+  state.selected = selected;
+  state.editing = false;
+  state.depthOpen = false;
+  state.fullNotesOpen = false;
+  state.showOriginal = false;
+  if (state.selected) {
+    for (const a of ancestorIds(state.index, state.selected)) state.expanded.add(a);
+    els.hint.hidden = true;
+  }
+  const viewChanged = prevMode !== state.mode || prevFocus !== state.focusId || prevSlug !== state.slug;
+  if (viewChanged) {
+    state.viewSides = assignSides(state.focusId || state.index.rootId, state.index.children);
+    state.userMoved = false;
+  }
+  draw();
+  renderPanel();
+  const shouldFit = fitMap || viewChanged;
+  requestAnimationFrame(() => {
+    if (shouldFit) fit();
+    if (state.selected) {
+      revealBranch(state.selected);
+      if (!shouldFit) ensureVisible(state.selected);
+    }
+  });
+}
+
+function openOverview({ push = true, fitMap = true } = {}) {
+  state.mode = "overview";
+  state.slug = null;
+  state.focusId = state.index.rootId;
+  state.selected = null;
+  state.editing = false;
+  state.depthOpen = false;
+  state.fullNotesOpen = false;
+  state.showOriginal = false;
+  state.viewSides = assignSides(state.index.rootId, state.index.children);
+  state.userMoved = false;
+  writeRoute({ push });
+  draw();
+  renderPanel();
+  if (fitMap) requestAnimationFrame(() => fit());
+}
+
+function openSubject(slug, { focusId = null, selectedId = null, push = true, fitMap = true } = {}) {
+  const subject = subjectBySlug(slug);
+  if (!subject) {
+    openOverview({ push, fitMap });
+    return;
+  }
+  const nextFocus = focusId && isUnder(state.index, subject.rootId, focusId) ? focusId : subject.rootId;
+  const viewChanged = state.mode !== "subject" || state.slug !== slug || state.focusId !== nextFocus;
+  state.mode = "subject";
+  state.slug = slug;
+  state.focusId = nextFocus;
+  const nextSelected = selectedId && isUnder(state.index, nextFocus, selectedId) ? selectedId : null;
+  state.selected = nextSelected;
+  state.editing = false;
+  state.depthOpen = false;
+  state.fullNotesOpen = false;
+  state.showOriginal = false;
+  if (state.selected) {
+    for (const a of ancestorIds(state.index, state.selected)) state.expanded.add(a);
+    els.hint.hidden = true;
+  }
+  if (viewChanged) {
+    state.viewSides = assignSides(state.focusId, state.index.children);
+    state.userMoved = false;
+  }
+  writeRoute({ push });
+  draw();
+  renderPanel();
+  if (fitMap || viewChanged) {
+    requestAnimationFrame(() => {
+      fit();
+      if (state.selected) revealBranch(state.selected);
+    });
+  } else if (state.selected) {
+    revealBranch(state.selected);
+    requestAnimationFrame(() => ensureVisible(state.selected));
+  }
+}
+
+function openNode(id, { push = true } = {}) {
+  if (!id || !state.index?.byId.has(id)) return;
+  if (id === state.index.rootId) {
+    openOverview({ push });
+    return;
+  }
+  const subject = subjectOfNode(state.index, state.subjects, id);
+  if (!subject) {
+    openOverview({ push });
+    return;
+  }
+  const keepFocus = state.mode === "subject" && state.slug === subject.slug && isUnder(state.index, state.focusId, id);
+  const focusId = keepFocus ? state.focusId : subject.rootId;
+  openSubject(subject.slug, { focusId, selectedId: id, push, fitMap: !keepFocus });
+}
+
+function clearSelection({ push = true } = {}) {
+  if (!state.selected) return;
+  state.selected = null;
+  state.editing = false;
+  state.depthOpen = false;
+  state.fullNotesOpen = false;
+  writeRoute({ push });
+  draw();
+  renderPanel();
+}
+
+function select(id, { toggle = false, push = true } = {}) {
+  if (!id || !state.index.byId.has(id)) return;
+  if (state.mode === "overview" && id !== state.index.rootId) {
+    const subject = subjectOfNode(state.index, state.subjects, id);
+    if (subject) {
+      openSubject(subject.slug, { push });
+      return;
+    }
+  }
+  if (state.mode === "subject" && state.focusId && !isUnder(state.index, state.focusId, id)) {
+    openNode(id, { push });
+    return;
+  }
+  if (id === state.index.rootId && state.mode === "overview") {
+    state.selected = id;
+    state.editing = false;
+    state.depthOpen = false;
+    state.fullNotesOpen = false;
+    state.showOriginal = false;
+    els.hint.hidden = true;
+    writeRoute({ push });
+    draw();
+    renderPanel();
+    return;
+  }
   state.selected = id;
   state.editing = false;
   state.depthOpen = false;
@@ -388,16 +692,146 @@ function select(id, { toggle = false } = {}) {
   state.showOriginal = false;
   for (const a of ancestorIds(state.index, id)) state.expanded.add(a);
   const kids = visibleKids(id);
-  if (toggle && kids.length && id !== state.index.rootId) {
+  if (toggle && kids.length && id !== layoutRoot()) {
     if (state.expanded.has(id)) state.expanded.delete(id);
     else state.expanded.add(id);
   }
   els.hint.hidden = true;
+  writeRoute({ push });
   draw();
   renderPanel();
   revealBranch(id);
-  const hash = `#${encodeURIComponent(id)}`;
-  if (location.hash !== hash) history.replaceState(null, "", hash);
+  requestAnimationFrame(() => ensureVisible(id));
+}
+
+function renderNav() {
+  if (!els.breadcrumb || !state.index) return;
+  const crumbs = [];
+  crumbs.push({ kind: "home", label: "Home", current: state.mode === "overview" && !state.selected });
+  if (state.mode === "subject" && state.slug) {
+    const subject = subjectBySlug(state.slug);
+    const subjectRoot = subject?.rootId;
+    const trailEnd = state.selected || (state.focusId && state.focusId !== subjectRoot ? state.focusId : null);
+    const trail = [];
+    if (trailEnd && trailEnd !== subjectRoot) {
+      const ids = [...ancestorIds(state.index, trailEnd)].reverse();
+      for (const id of ids) {
+        if (id === state.index.rootId || id === subjectRoot) continue;
+        trail.push(id);
+      }
+      if (state.selected && state.selected !== subjectRoot && !trail.includes(state.selected)) {
+        trail.push(state.selected);
+      }
+    }
+    const subjectCurrent = !trail.length && !state.selected;
+    crumbs.push({
+      kind: "subject",
+      slug: state.slug,
+      label: subject?.title || state.slug,
+      current: subjectCurrent,
+    });
+    for (const id of trail) {
+      const node = state.index.byId.get(id);
+      const isSelected = id === state.selected;
+      const isFocus = id === state.focusId && id !== subjectRoot;
+      crumbs.push({
+        kind: "node",
+        id,
+        slug: state.slug,
+        label: node?.title || id,
+        current: isSelected || (isFocus && !state.selected),
+        focusable: Boolean((state.index.children.get(id) || []).length) && !isSelected,
+      });
+    }
+  } else if (state.mode === "overview" && state.selected === state.index.rootId) {
+    crumbs[0].current = true;
+  }
+  els.breadcrumb.replaceChildren();
+  for (const crumb of crumbs) {
+    const li = document.createElement("li");
+    if (crumb.current) {
+      const span = document.createElement("span");
+      span.className = "current";
+      span.textContent = crumb.label;
+      span.setAttribute("aria-current", "page");
+      li.appendChild(span);
+    } else {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = crumb.label;
+      if (crumb.kind === "home") btn.dataset.nav = "home";
+      else if (crumb.kind === "subject") {
+        btn.dataset.nav = "subject";
+        btn.dataset.slug = crumb.slug;
+      } else {
+        btn.dataset.nav = crumb.focusable ? "focus" : "select";
+        btn.dataset.id = crumb.id;
+        btn.dataset.slug = crumb.slug;
+      }
+      li.appendChild(btn);
+    }
+    els.breadcrumb.appendChild(li);
+  }
+
+  if (els.subjectSwitch) {
+    const options = [`<option value="">Home overview</option>`];
+    for (const subject of state.subjects) {
+      options.push(
+        `<option value="${escapeHtml(subject.slug)}">${escapeHtml(subject.title)} (${subject.count})</option>`
+      );
+    }
+    const html = options.join("");
+    if (els.subjectSwitch.dataset.html !== html) {
+      els.subjectSwitch.innerHTML = html;
+      els.subjectSwitch.dataset.html = html;
+    }
+    const want = state.mode === "subject" && state.slug ? state.slug : "";
+    if (els.subjectSwitch.value !== want) els.subjectSwitch.value = want;
+  }
+  document.title = state.mode === "subject" && subjectBySlug(state.slug)
+    ? `${subjectBySlug(state.slug).title} · Knowledge Compendium`
+    : (state.index.byId.get(state.index.rootId)?.title || "Knowledge Compendium");
+}
+
+function onBreadcrumbClick(e) {
+  const btn = e.target.closest("button[data-nav]");
+  if (!btn || !els.breadcrumb.contains(btn)) return;
+  const nav = btn.dataset.nav;
+  if (nav === "home") openOverview({ push: true });
+  else if (nav === "subject") openSubject(btn.dataset.slug, { push: true });
+  else if (nav === "focus") openSubject(btn.dataset.slug || state.slug, { focusId: btn.dataset.id, push: true });
+  else if (nav === "select") select(btn.dataset.id, { toggle: false, push: true });
+}
+
+function onSubjectSwitch(e) {
+  const slug = e.target.value;
+  if (!slug) openOverview({ push: true });
+  else openSubject(slug, { push: true });
+}
+
+function sameAppUrl(href) {
+  try {
+    const url = new URL(href, location.href);
+    if (url.origin !== location.origin) return false;
+    const norm = (path) => path.replace(/\/index\.html$/i, "/").replace(/\/+$/, "") || "/";
+    return norm(url.pathname) === norm(location.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function onAppLinkClick(e) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const link = e.target.closest("a[href]");
+  if (!link) return;
+  if (!sameAppUrl(link.href)) return;
+  const url = new URL(link.href, location.href);
+  if (!url.hash) return;
+  e.preventDefault();
+  routeApplying = false;
+  const target = normalizeHash(url.hash);
+  if (normalizeHash(location.hash) !== target) history.pushState(null, "", target);
+  applyRoute({ fitMap: true });
 }
 
 function revealBranch(id) {
@@ -439,23 +873,37 @@ function revealBranch(id) {
 }
 
 function expandAll() {
+  if (state.mode === "overview") return;
+  const root = layoutRoot();
+  const allowed = root ? new Set(subtreeIds(state.index, root)) : null;
   for (const [id, kids] of state.index.children) {
+    if (allowed && !allowed.has(id)) continue;
     if ((state.filter ? kids.filter((k) => state.filter.has(k)) : kids).length) state.expanded.add(id);
   }
-  if (state.index.rootId) state.expanded.add(state.index.rootId);
+  if (root) state.expanded.add(root);
   draw();
   state.userMoved = false;
   fit();
 }
 
 function collapseAll() {
+  if (state.mode === "overview") return;
   state.expanded = new Set();
+  const root = layoutRoot();
+  if (root) state.expanded.add(root);
   draw();
   state.userMoved = false;
   fit();
 }
 
 function expandSubtree(id) {
+  if (state.mode === "overview" && id !== state.index.rootId) {
+    const subject = subjectOfNode(state.index, state.subjects, id);
+    if (subject) {
+      openSubject(subject.slug, { push: true });
+      return;
+    }
+  }
   const walk = (cur) => {
     const kids = visibleKids(cur);
     if (!kids.length) return;
@@ -476,6 +924,18 @@ function runSearch(options = {}) {
       const blob = state.blobs.get(id) || "";
       if (blob.includes(q)) state.hits.push(id);
     }
+    const rank = (id) => {
+      const node = state.index.byId.get(id);
+      const title = (node?.title || "").toLowerCase();
+      if (title === q) return 0;
+      if (title.startsWith(q)) return 1;
+      if (title.includes(q)) return 2;
+      const summary = (node?.summary || "").toLowerCase();
+      if (summary.includes(q)) return 3;
+      return 4;
+    };
+    const orderIndex = new Map(state.index.order.map((id, i) => [id, i]));
+    state.hits.sort((a, b) => rank(a) - rank(b) || (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0));
     for (const id of state.hits) {
       for (const a of ancestorIds(state.index, id)) {
         state.expanded.add(a);
@@ -484,27 +944,17 @@ function runSearch(options = {}) {
     }
   }
   state.hitCursor = 0;
-  if (state.hits.length && options.focus !== false) {
-    state.selected = state.hits[0];
-    state.editing = false;
-    state.depthOpen = false;
-    state.showOriginal = false;
-  }
-  draw();
   const n = state.hits.length;
   els.matchLabel.textContent = q.length < 2 ? "" : n ? `1 / ${n}` : "No matches";
   if (n && options.focus !== false) {
-    if (state.cam.k < 0.72) state.cam.k = 0.72;
-    const id = state.hits[0];
-    const p = state.positions.get(id);
-    if (p) {
-      const rect = els.viewport.getBoundingClientRect();
-      state.cam.x = rect.width / 2 - p.x * state.cam.k;
-      state.cam.y = rect.height / 2 - p.y * state.cam.k;
+    openNode(state.hits[0], { push: true });
+    if (state.cam.k < 0.72) {
+      state.cam.k = 0.72;
       applyCam();
     }
     markCurrentHit();
-    renderPanel();
+  } else {
+    draw();
   }
 }
 
@@ -994,11 +1444,7 @@ function onPanelClick(e) {
   const act = btn.dataset.act;
   if (act === "open") select(btn.dataset.id, { toggle: true });
   else if (act === "close-panel") {
-    state.selected = null;
-    state.editing = false;
-    history.replaceState(null, "", location.pathname + location.search);
-    draw();
-    renderPanel();
+    clearSelection({ push: true });
   } else if (act === "wording") {
     state.showOriginal = !state.showOriginal;
     const node = state.index.byId.get(state.selected);
@@ -1265,6 +1711,13 @@ function wirePanelResize() {
 function wireChrome() {
   wirePanelResize();
   els.panel.addEventListener("click", onPanelClick);
+  els.panel.addEventListener("click", onAppLinkClick);
+  els.breadcrumb?.addEventListener("click", onBreadcrumbClick);
+  els.subjectSwitch?.addEventListener("change", onSubjectSwitch);
+  window.addEventListener("popstate", () => {
+    if (!state.index) return;
+    applyRoute({ fitMap: true });
+  });
   els.panel.addEventListener("toggle", (e) => {
     const det = e.target.closest?.("details.full-notes");
     if (!det || !els.panel.contains(det)) return;
@@ -1336,9 +1789,7 @@ function wireChrome() {
         state.editing = false;
         renderPanel();
       } else if (state.selected) {
-        state.selected = null;
-        draw();
-        renderPanel();
+        clearSelection({ push: true });
       } else if (els.search.value) {
         els.search.value = "";
         state.query = "";
@@ -1460,7 +1911,10 @@ async function openCompendium(key) {
     if (data && !Array.isArray(data) && data.sections && typeof data.sections === "object") {
       Object.assign(state.sections, data.sections);
     }
-    for (const node of list) nodes.push(node);
+    for (const node of list) {
+      nodes.push(node);
+      if (node && node.id != null) state.nodeBranch.set(String(node.id), branch.id);
+    }
   }
   state.key = key;
   state.baseNodes = nodes;
@@ -1471,13 +1925,10 @@ async function openCompendium(key) {
   document.title = root?.title || "Knowledge Compendium";
   els.gate.hidden = true;
   els.app.hidden = false;
-  draw();
-  renderPanel();
-  const hashId = decodeURIComponent(location.hash.replace(/^#/, ""));
-  requestAnimationFrame(() => {
-    fit();
-    if (hashId && state.index.byId.has(hashId)) select(hashId, { toggle: false });
-  });
+  if (!location.hash || location.hash === "#") {
+    history.replaceState(null, "", "#/");
+  }
+  applyRoute({ fitMap: true });
 }
 
 function lock() {
@@ -1489,6 +1940,12 @@ function lock() {
   state.editing = false;
   state.expanded = new Set();
   state.positions = new Map();
+  state.mode = "overview";
+  state.slug = null;
+  state.focusId = null;
+  state.subjects = [];
+  state.nodeBranch = new Map();
+  state.viewSides = new Map();
   nodeButtons.clear();
   els.nodes.innerHTML = "";
   els.edges.innerHTML = "";
