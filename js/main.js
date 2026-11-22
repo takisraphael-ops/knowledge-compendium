@@ -9,7 +9,7 @@ import {
   exportRawKey,
   importRawKey,
 } from "./crypto.js";
-import { layoutMap, assignSides } from "./layout.js";
+import { layoutMap, assignSides, assignSidesEven } from "./layout.js";
 import {
   formatHash,
   parseHash,
@@ -148,6 +148,12 @@ function subjectBySlug(slug) {
   return state.subjects.find((s) => s.slug === slug) || null;
 }
 
+function sidesForCurrentView(rootId) {
+  const id = rootId || layoutRoot() || state.index.rootId;
+  if (state.mode === "overview") return assignSidesEven(id, state.index.children);
+  return assignSides(id, state.index.children);
+}
+
 function topicCountLabel(n) {
   const count = Number(n) || 0;
   return count === 1 ? "1 topic" : `${count} topics`;
@@ -226,8 +232,8 @@ function measureOf(id) {
     measureCtx.font = '600 12px "Liberation Sans", "Segoe UI", sans-serif';
     const countW = measureCtx.measureText(countLabel).width;
     return {
-      w: Math.round(Math.min(280, Math.max(140, Math.max(textW, countW) + 36))),
-      h: 54,
+      w: Math.round(Math.min(320, Math.max(168, Math.max(textW, countW) + 56))),
+      h: 72,
     };
   }
   const chrome = (root ? 40 : 42) + (badge ? 40 : 0);
@@ -263,7 +269,7 @@ function rebuildDerived() {
   level1.forEach((id, i) => state.colors.set(id, PALETTE[i % PALETTE.length]));
   buildSubjects();
   const viewRoot = layoutRoot() || state.index.rootId;
-  state.viewSides = assignSides(viewRoot, state.index.children);
+  state.viewSides = sidesForCurrentView(viewRoot);
   if (state.selected && !state.index.byId.has(state.selected)) {
     state.selected = null;
     state.editing = false;
@@ -437,15 +443,18 @@ function drawNodes() {
       ? `<span class="badge">${open ? "–" : `+${kids.length}`}</span>`
       : "";
     const dot = root ? "" : `<span class="dot" aria-hidden="true"></span>`;
+    const label = `<span class="label">${highlightTitle(node.title, state.query)}</span>`;
     const count = overviewSubject
       ? `<span class="topic-count">${escapeHtml(topicCountLabel(subjectCountFor(id)))}</span>`
       : "";
-    const html = `${dot}<span class="label">${highlightTitle(node.title, state.query)}</span>${count}${badge}`;
+    const html = overviewSubject
+      ? `<span class="overview-title">${dot}${label}</span>${count}`
+      : `${dot}${label}${badge}`;
     if (btn.dataset.html !== html) {
       btn.innerHTML = html;
       btn.dataset.html = html;
     }
-    if (fresh) btn.classList.add("enter");
+    if (fresh && !overviewSubject) btn.classList.add("enter");
   }
   for (const [id, btn] of nodeButtons) {
     if (!seen.has(id)) {
@@ -562,7 +571,7 @@ function applyRoute({ fitMap = false } = {}) {
   }
   const viewChanged = prevMode !== state.mode || prevFocus !== state.focusId || prevSlug !== state.slug;
   if (viewChanged) {
-    state.viewSides = assignSides(state.focusId || state.index.rootId, state.index.children);
+    state.viewSides = sidesForCurrentView(state.focusId || state.index.rootId);
     state.userMoved = false;
   }
   draw();
@@ -586,7 +595,7 @@ function openOverview({ push = true, fitMap = true } = {}) {
   state.depthOpen = false;
   state.fullNotesOpen = false;
   state.showOriginal = false;
-  state.viewSides = assignSides(state.index.rootId, state.index.children);
+  state.viewSides = sidesForCurrentView(state.index.rootId);
   state.userMoved = false;
   writeRoute({ push });
   draw();
@@ -616,7 +625,7 @@ function openSubject(slug, { focusId = null, selectedId = null, push = true, fit
     els.hint.hidden = true;
   }
   if (viewChanged) {
-    state.viewSides = assignSides(state.focusId, state.index.children);
+    state.viewSides = sidesForCurrentView(state.focusId);
     state.userMoved = false;
   }
   writeRoute({ push });

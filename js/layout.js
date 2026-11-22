@@ -28,6 +28,20 @@ export function assignSides(rootId, children) {
   return side;
 }
 
+/** Split children evenly by card count (not subtree weight). Used on the
+ *  overview so eleven subjects do not pile up on the lighter-weight side. */
+export function assignSidesEven(rootId, children) {
+  const kids = children.get(rootId) || [];
+  const load = { 1: 0, [-1]: 0 };
+  const side = new Map();
+  for (const id of kids) {
+    const s = load[1] <= load[-1] ? 1 : -1;
+    side.set(id, s);
+    load[s] += 1;
+  }
+  return side;
+}
+
 function layoutSubtree(id, measure, isOpen, kidsOf, stack) {
   if (stack.has(id) || stack.size > 40) {
     const box = measure(id);
