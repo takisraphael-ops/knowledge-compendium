@@ -728,6 +728,9 @@ function renderNav() {
         if (id === state.index.rootId || id === subjectRoot) continue;
         trail.push(id);
       }
+      if (state.focusId && state.focusId !== subjectRoot && !trail.includes(state.focusId)) {
+        trail.push(state.focusId);
+      }
       if (state.selected && state.selected !== subjectRoot && !trail.includes(state.selected)) {
         trail.push(state.selected);
       }

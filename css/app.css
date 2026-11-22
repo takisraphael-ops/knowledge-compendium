@@ -605,6 +605,19 @@ h1 .added-badge { font-weight: 700; }
 }
 @media (min-width: 861px) {
   #hint { display: none; }
+  #panel .summary,
+  #panel .notes,
+  #panel .study-callout {
+    max-width: none;
+    width: 100%;
+  }
+  #panel .your-notes,
+  #panel .expanded-block,
+  #panel .full-notes,
+  #panel .grokimus-open {
+    width: 100%;
+    max-width: none;
+  }
   #panel {
     transform: none !important;
     flex: 0 0 auto;
