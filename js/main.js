@@ -128,6 +128,7 @@ const state = {
   subjects: [],
   nodeBranch: new Map(),
   viewSides: new Map(),
+  redirects: {},
 };
 
 const nodeButtons = new Map();
@@ -530,7 +531,7 @@ function clamp(n, a, b) {
 
 function applyRoute({ fitMap = false } = {}) {
   if (!state.index) return;
-  const parsed = parseHash(location.hash, { index: state.index, subjects: state.subjects });
+  const parsed = parseHash(location.hash, { index: state.index, subjects: state.subjects, redirects: state.redirects });
   if (parsed.legacy) {
     routeApplying = true;
     history.replaceState(null, "", formatHash({
@@ -1833,6 +1834,12 @@ async function boot() {
   } catch (err) {
     els.gateStatus.textContent = "Could not load data/index.json. Serve this folder over HTTP (not as a file).";
     return;
+  }
+  try {
+    const redirRes = await fetch(new URL("redirects.json", DATA_BASE), { cache: "no-store" });
+    state.redirects = redirRes.ok ? await redirRes.json() : {};
+  } catch {
+    state.redirects = {};
   }
   state.indexFile = index;
   state.saltB64 = index?.kdf?.salt || "";

@@ -8,6 +8,27 @@ export function escapeHtml(s) {
   }[c]));
 }
 
+function mapTextOutsideProtectedTags(html, fn) {
+  const parts = String(html).split(/(<[^>]+>)/);
+  let depth = 0;
+  const protect = /^(?:code|pre|a|kbd|samp)$/i;
+  return parts.map((p) => {
+    const open = p.match(/^<([a-zA-Z0-9]+)\b/);
+    const close = p.match(/^<\/([a-zA-Z0-9]+)>/);
+    if (open && protect.test(open[1])) depth++;
+    const out = p.startsWith("<") || depth > 0 ? p : fn(p);
+    if (close && protect.test(close[1]) && depth) depth--;
+    return out;
+  }).join("");
+}
+
+function italicize(s) {
+  // *emphasis* only. Opening/closing marks must not sit against a letter or
+  // digit, so 3*4 + 5*6 is left alone. Underscore _emphasis_ is not supported:
+  // it would mangle snake_case, file names and similar identifiers.
+  return s.replace(/(?<![A-Za-z0-9\\])\*(?![\s*])([^*\n]*?[^\s*])\*(?![A-Za-z0-9])/g, "<em>$1</em>");
+}
+
 function inline(s) {
   let t = escapeHtml(s);
   t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -20,6 +41,7 @@ function inline(s) {
     const core = trail ? m.slice(0, -trail.length) : m;
     return `<a href="${core}" target="_blank" rel="noopener noreferrer">${core}</a>${trail}`;
   });
+  t = mapTextOutsideProtectedTags(t, italicize);
   return t;
 }
 

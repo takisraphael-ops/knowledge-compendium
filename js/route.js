@@ -8,6 +8,17 @@
  *   #<nodeId>                       legacy deep link (still honoured)
  */
 
+export function resolveRedirect(id, redirects) {
+  if (!id || !redirects || typeof redirects !== "object") return id;
+  const seen = new Set();
+  let cur = id;
+  while (cur && Object.prototype.hasOwnProperty.call(redirects, cur) && !seen.has(cur)) {
+    seen.add(cur);
+    cur = redirects[cur];
+  }
+  return cur;
+}
+
 export function slugifyTitle(title) {
   return String(title || "")
     .toLowerCase()
@@ -70,11 +81,13 @@ export function formatHash({ mode, slug, focusId, selectedId, subjectRootId }) {
   return `#/${encodeURIComponent(slug)}`;
 }
 
-export function parseHash(hash, { index, subjects } = {}) {
+export function parseHash(hash, { index, subjects, redirects } = {}) {
   const raw = String(hash || "").replace(/^#/, "");
   const bySlug = new Map((subjects || []).map((s) => [s.slug, s]));
+  const resolve = (id) => resolveRedirect(id, redirects);
 
   const asLegacyId = (id) => {
+    id = resolve(id);
     if (!index?.byId.has(id)) return { mode: "overview", slug: null, focusId: null, selectedId: null, legacy: true };
     const subject = subjectOfNode(index, subjects, id);
     if (!subject) return { mode: "overview", slug: null, focusId: null, selectedId: id, legacy: true };
@@ -98,7 +111,7 @@ export function parseHash(hash, { index, subjects } = {}) {
   const subject = bySlug.get(parts[0]);
   if (!subject) {
     // A lone "/<id>" typo, or an old path.
-    if (parts.length === 1 && index?.byId.has(parts[0])) return asLegacyId(parts[0]);
+    if (parts.length === 1 && index?.byId.has(resolve(parts[0]))) return asLegacyId(parts[0]);
     return { mode: "overview", slug: null, focusId: null, selectedId: null };
   }
 
@@ -107,17 +120,21 @@ export function parseHash(hash, { index, subjects } = {}) {
   }
 
   if (parts.length === 2 && trailing) {
-    const focusId = index?.byId.has(parts[1]) ? parts[1] : subject.rootId;
+    const focusCand = resolve(parts[1]);
+    const focusId = index?.byId.has(focusCand) ? focusCand : subject.rootId;
     return { mode: "subject", slug: subject.slug, focusId, selectedId: null };
   }
 
   if (parts.length === 2) {
-    const selectedId = index?.byId.has(parts[1]) ? parts[1] : null;
+    const selCand = resolve(parts[1]);
+    const selectedId = index?.byId.has(selCand) ? selCand : null;
     return { mode: "subject", slug: subject.slug, focusId: subject.rootId, selectedId };
   }
 
-  const focusId = index?.byId.has(parts[1]) ? parts[1] : subject.rootId;
-  const selectedId = parts[2] && index?.byId.has(parts[2]) ? parts[2] : null;
+  const focusCand = resolve(parts[1]);
+  const focusId = index?.byId.has(focusCand) ? focusCand : subject.rootId;
+  const selCand = parts[2] ? resolve(parts[2]) : null;
+  const selectedId = selCand && index?.byId.has(selCand) ? selCand : null;
   return { mode: "subject", slug: subject.slug, focusId, selectedId };
 }
 
