@@ -87,9 +87,9 @@ function renderTable(rows) {
 
 
 const TERM_SKIP = new Set([
-  "note", "notes", "example", "for example", "e.g.", "e.g", "i.e.", "i.e",
+  "note", "notes", "for example", "e.g.", "e.g", "i.e.", "i.e",
   "see also", "warning", "tip", "hint", "remember", "important", "caution",
-  "defence", "defense", "defences", "defenses", "source", "update",
+  "source", "update",
   "please note", "nb", "n.b.", "ps", "p.s.", "important note", "trap",
 ]);
 
@@ -114,7 +114,7 @@ const TRAILING_HEADS = new Set([
 // "CSR. Hierarchy" cannot be one term.
 const TERM_WORD = "(?:[A-Za-z][A-Za-z0-9+_'’/-]*[™®©]*|[0-9]+(?:\\.[0-9]+)+|[0-9]+[A-Za-z0-9+_'’/-]*)";
 const TERM_BODY = TERM_WORD
-  + "(?:[ \\t]+" + TERM_WORD + "|,[ \\t]+" + TERM_WORD + "|\\s*\\([^\\)]{1,90}\\))*"
+  + "(?:[ \\t]+" + TERM_WORD + "|,[ \\t]+" + TERM_WORD + "|[ \\t]/[ \\t]+" + TERM_WORD + "|\\s*\\([^\\)]{1,90}\\))*"
   + "[ ™®©]*";
 
 const TERM_ANCHORED = new RegExp("^(?:" + TERM_BODY + ")$");
@@ -127,6 +127,8 @@ function isSkipTerm(label) {
   if (TERM_SKIP.has(lower)) return true;
   const words = raw.split(/\s+/);
   if (words.length > 14) return true;
+  if (words.length >= 8 && !/\([^)]+\)/.test(raw)) return true;
+  if (words.length >= 5 && !/\([^)]+\)/.test(raw) && /\b(is|are|was|were|pull|pulls|means|includes|requires|gather|gathers)\b/i.test(raw)) return true;
   const first = words[0].toLowerCase().replace(/[.,:]+$/, "");
   if (TERM_START_SKIP.has(first) && words.length >= 3) return true;
   return false;
@@ -145,6 +147,70 @@ function tokenizeTerm(label) {
   let m;
   while ((m = re.exec(String(label || "")))) out.push(m[0]);
   return out;
+}
+
+
+function wordCount(s) {
+  return String(s || "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+function splitLongProse(text, limit = 110) {
+  if (wordCount(text) <= limit) return null;
+  const sentences = String(text).split(/(?<=[.!?])(?:[ \t]+|\s+)(?=[A-Z“"‘])/);
+  if (sentences.length < 2) return null;
+  const paras = [];
+  let buf = [];
+  let wc = 0;
+  for (const sentence of sentences) {
+    const w = wordCount(sentence);
+    if (buf.length && wc + w > 80) {
+      paras.push(buf.join(" "));
+      buf = [sentence];
+      wc = w;
+    } else {
+      buf.push(sentence);
+      wc += w;
+    }
+  }
+  if (buf.length) paras.push(buf.join(" "));
+  return paras.length >= 2 ? paras : null;
+}
+
+function renderSeeAlso(text) {
+  const m = String(text || "").trim().match(/^(?:\*\*)?See also:(?:\*\*)?\s*([\s\S]+)$/i);
+  if (!m) return "";
+  const rest = m[1].trim();
+  if (!rest) return "";
+  const parts = [];
+  let buf = "";
+  let depth = 0;
+  for (const ch of rest) {
+    if (ch === "[") depth++;
+    else if (ch === "]") depth = Math.max(0, depth - 1);
+    if ((ch === "," || ch === "·") && depth === 0) {
+      const bit = buf.trim().replace(/^[;·,\s]+|[;·,\s]+$/g, "");
+      if (bit) parts.push(bit);
+      buf = "";
+    } else buf += ch;
+  }
+  const last = buf.trim().replace(/^[;·,\s]+|[;·,\s]+$/g, "");
+  if (last) parts.push(last);
+  if (parts.length < 2) return "";
+  return `<p class="see-also-label">See also</p><ul class="see-also-list">${parts.map((item) => `<li>${inline(item)}</li>`).join("")}</ul>`;
+}
+
+function renderParagraph(trimmed) {
+  const chunks = String(trimmed || "").split(/_{8,}/);
+  if (chunks.length > 1) {
+    return chunks.map((chunk) => renderParagraph(chunk.trim())).filter(Boolean).join('<hr class="notes-rule" />');
+  }
+  const see = renderSeeAlso(trimmed);
+  if (see) return see;
+  const runs = parseTermRuns(trimmed);
+  if (runs) return renderTermRuns(runs);
+  const paras = splitLongProse(trimmed);
+  if (paras) return paras.map((para) => `<p>${inline(para)}</p>`).join("");
+  return `<p>${inline(trimmed)}</p>`;
 }
 
 function wordKind(tok) {
@@ -185,8 +251,16 @@ function isWellFormedTerm(label) {
 function packedBefore(text, index) {
   if (index <= 0) return true;
   if (/^\s+$/.test(text.slice(0, index))) return true;
-  const ch = text.slice(Math.max(0, index - 12), index);
-  return /[A-Za-z0-9)\]}'’”`]["']?[ \t]$/.test(ch) || /[A-Za-z0-9)'’”`][ \t]$/.test(ch);
+  const ch = text.slice(Math.max(0, index - 16), index);
+  // "image). Tokenisation:" and "device). SMTP:" are common in packed lists.
+  if (/\)[.!?;:]?[ \t]$/.test(ch)) return true;
+  if (/[A-Za-z0-9)\]}'’”`]["']?[ \t]$/.test(ch)) return true;
+  if (/[A-Za-z0-9)'’”`][ \t]$/.test(ch)) return true;
+  if (/:[ \t]$/.test(ch)) return true;
+  if (/\d+\.[ \t]$/.test(ch)) return true; // 2. Delivery:
+  if (/[*`"'”’)][.!?]?[ \t]$/.test(ch)) return true;
+  if (/[A-Za-z]{2,}[.!?][ \t]$/.test(ch)) return true;
+  return false;
 }
 
 function canStartTermAt(text, index, label, alreadyInRun) {
@@ -194,7 +268,7 @@ function canStartTermAt(text, index, label, alreadyInRun) {
   if (/^\s+$/.test(text.slice(0, index))) return true;
   if (packedBefore(text, index) && firstWordOk(label, false)) return true;
   const before = text.slice(Math.max(0, index - 12), index);
-  if (/[a-z]{3,}[.!?][ \t]$/.test(before)) {
+  if (/[A-Za-z]{2,}[.!?][ \t]$/.test(before) || /\)[.!?][ \t]$/.test(before) || /:[ \t]$/.test(before)) {
     const words = String(label || "").trim().split(/\s+/);
     if (words.length >= 2) return true;
     if (/\([^)]+\)/.test(label)) return true;
@@ -289,8 +363,17 @@ function splitMissingColons(items) {
 }
 
 /** Split a packed "Term: definition Term2: definition" paragraph into items. */
+function normalizeTermSource(text) {
+  return String(text || "")
+    .replace(/\)([A-Z])/g, ") $1")
+    .replace(/(?<=[A-Za-z]{2})\.([A-Z])/g, ". $1")
+    .replace(/\.(\d+)\.\s*/g, ". $1. ")
+    .replace(/\?\.\s*/g, "? ")
+    .replace(/\.{2,}/g, ". ");
+}
+
 export function parseTermRuns(text) {
-  const src = String(text || "");
+  const src = normalizeTermSource(text);
   if (!src.includes(": ") && !src.includes("`:")) return null;
   const starts = findAllTermStarts(src);
   if (!starts.length) return null;
@@ -379,6 +462,11 @@ function renderBlocks(lines, opts = {}) {
       i++;
       continue;
     }
+    if (/^[_—–-]{8,}$/.test(trimmed)) {
+      html.push('<hr class="notes-rule" />');
+      i++;
+      continue;
+    }
     const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const kind = opts.studyCallouts === false ? "" : studyCalloutKind(heading[2]);
@@ -421,13 +509,7 @@ function renderBlocks(lines, opts = {}) {
       html.push(`<ol>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ol>`);
       continue;
     }
-    const runs = parseTermRuns(trimmed);
-    if (runs) {
-      html.push(renderTermRuns(runs));
-      i++;
-      continue;
-    }
-    html.push(`<p>${inline(trimmed)}</p>`);
+    html.push(renderParagraph(trimmed));
     i++;
   }
   return html.join("");
@@ -624,6 +706,7 @@ function renderBlocksHighlighted(lines, marks) {
     const raw = lines[i];
     const trimmed = raw.trim();
     if (!trimmed) { i++; continue; }
+    if (/^[_—–-]{8,}$/.test(trimmed)) { html.push('<hr class="notes-rule" />'); i++; continue; }
     const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const kind = studyCalloutKind(heading[2]);
@@ -676,14 +759,8 @@ function renderBlocksHighlighted(lines, marks) {
       html.push(`<ol>${items.join("")}</ol>`);
       continue;
     }
-    const runsH = parseTermRuns(trimmed);
-    if (runsH) {
-      const block = renderTermRuns(runsH);
-      html.push(marks.has(i) ? `<div class="own-passage-block">${block}</div>` : block);
-      i++;
-      continue;
-    }
-    html.push(`<p>${wrapInline(trimmed, marks.has(i))}</p>`);
+    const blockH = renderParagraph(trimmed);
+    html.push(marks.has(i) ? `<div class="own-passage-block">${blockH}</div>` : blockH);
     i++;
   }
   return html.join("");

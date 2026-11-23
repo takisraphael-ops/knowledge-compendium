@@ -377,6 +377,7 @@ body.overview-mode .map-controls.left { display: none; }
 }
 
 #panel {
+  min-width: 0;
   width: min(420px, 100%);
   background: var(--panel);
   border-left: 1px solid var(--line);
@@ -393,7 +394,7 @@ body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user
 .crumbs button { background: none; border: 0; padding: 0; color: var(--teal); text-align: left; }
 .sep { opacity: 0.6; }
 #panel h1 { font-family: var(--serif); font-size: 1.65rem; line-height: 1.25; letter-spacing: -0.02em; margin: 8px 0 14px; font-weight: 650; }
-.summary { font-size: 1.05rem; line-height: 1.7; margin: 0 0 1.25em; max-width: 72ch; color: #24323a; }
+.summary { font-size: 1.05rem; line-height: 1.7; margin: 0 0 1.25em; max-width: min(72ch, 100%); color: #24323a; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 12px; }
 .chip {
   border: 0;
@@ -465,7 +466,7 @@ body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user
 h1 .added-badge { font-weight: 700; }
 .grokimus-open { margin: 12px 0 20px; }
 .depth-btn { margin: 8px 0 16px; }
-.notes { font-family: var(--serif); font-size: 1.125rem; line-height: 1.7; max-width: 72ch; }
+.notes { font-family: var(--serif); font-size: 1.125rem; line-height: 1.7; max-width: min(72ch, 100%); }
 .notes p { margin: 0 0 1.15em; }
 .notes p:last-child { margin-bottom: 0.2em; }
 .notes h3, .notes h4 { font-family: var(--sans); letter-spacing: -0.01em; margin: 1.7em 0 0.6em; font-weight: 700; }
@@ -476,14 +477,14 @@ h1 .added-badge { font-weight: 700; }
   flex-direction: column;
   gap: 1.15rem;
   margin: 12px 0 22px;
-  max-width: 72ch;
+  max-width: min(72ch, 100%);
 }
 .study-callout {
   border: 1px solid #e6e0d6;
   border-radius: 12px;
   padding: 16px 16px 14px;
   margin: 0;
-  max-width: 72ch;
+  max-width: min(72ch, 100%);
 }
 .study-callout > .study-callout-label {
   font-family: var(--sans);
@@ -668,7 +669,7 @@ h1 .added-badge { font-weight: 700; }
   color: var(--teal);
   margin-bottom: 8px;
 }
-.table-wrap { overflow-x: auto; margin: 0 0 0.9em; border: 1px solid #e3dcd0; border-radius: 8px; }
+.table-wrap { display: block; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 0 0.9em; border: 1px solid #e3dcd0; border-radius: 8px; }
 .notes table { border-collapse: collapse; width: 100%; font-family: var(--sans); font-size: 0.92rem; line-height: 1.45; }
 .notes th, .notes td { border: 0; border-bottom: 1px solid #e3dcd0; padding: 8px 10px; vertical-align: top; text-align: left; }
 .notes tr:last-child td { border-bottom: 0; }
@@ -749,7 +750,7 @@ h1 .added-badge { font-weight: 700; }
   #panel .key-terms,
   #panel .term-run {
     width: 100%;
-    max-width: 72ch;
+    max-width: min(72ch, 100%);
   }
   #panel {
     transform: none !important;
@@ -839,3 +840,46 @@ mark.own-passage, .own-passage-block {
 }
 .own-passage-block { padding: 4px 6px; margin: 0 0 0.8em; }
 .own-passage-block .table-wrap { margin: 0; }
+
+
+.see-also-label {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 0.98rem;
+  margin: 1.2em 0 0.45em;
+}
+.see-also-list { margin: 0 0 1.2em; padding-left: 1.35em; }
+.see-also-list li { margin: 0.45em 0; line-height: 1.6; }
+.notes pre, .notes code {
+  max-width: 100%;
+}
+.notes pre {
+  overflow-x: auto;
+  padding: 0.7em 0.85em;
+  line-height: 1.55;
+  background: #f3efe6;
+  border: 1px solid #e7e0d4;
+  border-radius: 8px;
+  margin: 0 0 1.15em;
+}
+.notes img, .notes table, .notes .table-wrap, .your-notes .table-wrap, .expanded-block .table-wrap {
+  max-width: 100%;
+}
+.table-wrap { display: block; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }
+
+
+.notes-rule {
+  border: 0;
+  border-top: 1px solid #d9d2c6;
+  margin: 1.1em 0;
+}
+.notes, .your-notes, .expanded-block, .study-callout, .key-terms, .term-run, .full-notes, .study-stack {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+.term-run dt, .term-run dd, .key-term dt, .key-term dd, .notes a, .notes code {
+  overflow-wrap: anywhere;
+}
