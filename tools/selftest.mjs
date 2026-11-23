@@ -135,6 +135,11 @@ try {
   swapped = true;
 }
 check("swapped branch id rejected", swapped);
+const packed = await encryptJson(key, secret, "demo", { compress: true });
+check("compressed payload flagged", packed.comp === "deflate");
+const packedBack = await decryptJson(key, packed, "demo");
+check("compressed round trip", JSON.stringify(packedBack) === JSON.stringify(secret));
+check("uncompressed payload has no comp flag", blob.comp == null);
 
 const dir = await mkdtemp(join(tmpdir(), "kc-merge-"));
 await cp(join(root, "sample-data"), join(dir, "plain"), { recursive: true });

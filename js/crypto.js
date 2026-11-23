@@ -59,25 +59,51 @@ export async function exportRawKey(key) {
   return bytesToB64(raw);
 }
 
-export async function encryptJson(key, value, aad) {
+async function transformBytes(stream, bytes) {
+  // Start reading before writing so a large payload cannot deadlock on backpressure.
+  const dest = new Response(stream.readable).arrayBuffer();
+  const writer = stream.writable.getWriter();
+  await writer.write(bytes);
+  await writer.close();
+  return new Uint8Array(await dest);
+}
+
+async function deflateBytes(bytes) {
+  return transformBytes(new CompressionStream("deflate"), bytes);
+}
+
+async function inflateBytes(bytes) {
+  return transformBytes(new DecompressionStream("deflate"), bytes);
+}
+
+export async function encryptJson(key, value, aad, opts = {}) {
   const iv = randomBytes(12);
-  const plain = encoder.encode(JSON.stringify(value));
+  let plain = encoder.encode(JSON.stringify(value));
+  const compress = Boolean(opts.compress);
+  if (compress) plain = await deflateBytes(plain);
   const ct = await subtle.encrypt(
     { name: "AES-GCM", iv, additionalData: encoder.encode(aad) },
     key,
     plain
   );
-  return { v: 1, alg: "AES-GCM", iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ct)) };
+  const out = { v: 1, alg: "AES-GCM", iv: bytesToB64(iv), ciphertext: bytesToB64(new Uint8Array(ct)) };
+  if (compress) out.comp = "deflate";
+  return out;
 }
 
 export async function decryptJson(key, payload, aad) {
   const iv = b64ToBytes(payload.iv);
   const ct = b64ToBytes(payload.ciphertext);
-  const plain = await subtle.decrypt(
+  let plain = await subtle.decrypt(
     { name: "AES-GCM", iv, additionalData: encoder.encode(aad) },
     key,
     ct
   );
+  if (payload.comp === "deflate") {
+    plain = await inflateBytes(new Uint8Array(plain));
+  } else if (payload.comp) {
+    throw new Error(`Unsupported ciphertext compression: ${payload.comp}`);
+  }
   return JSON.parse(decoder.decode(plain));
 }
 

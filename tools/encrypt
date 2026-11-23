@@ -15,7 +15,7 @@ import {
 } from "../js/crypto.js";
 
 function usage() {
-  return `Usage: node tools/encrypt --input <plaintext-dir> --output <data-dir> [--iterations ${DEFAULT_ITERATIONS}] [--fresh-salt] [--demo]
+  return `Usage: node tools/encrypt --input <plaintext-dir> --output <data-dir> [--iterations ${DEFAULT_ITERATIONS}] [--fresh-salt] [--demo] [--compress]
 
 Reads KC_PASSPHRASE from the environment, or prompts with hidden input.
 Encrypts every *.json in the input directory except index.json.
@@ -27,7 +27,7 @@ iteration count already in <output>/index.json so a remembered unlock still work
 }
 
 function parseArgs(argv) {
-  const out = { iterations: DEFAULT_ITERATIONS, fresh: false, demo: false };
+  const out = { iterations: DEFAULT_ITERATIONS, fresh: false, demo: false, compress: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--help" || arg === "-h") out.help = true;
@@ -36,6 +36,7 @@ function parseArgs(argv) {
     else if (arg === "--iterations") out.iterations = Number(argv[++i]);
     else if (arg === "--fresh-salt") out.fresh = true;
     else if (arg === "--demo") out.demo = true;
+    else if (arg === "--compress") out.compress = true;
     else if (arg === "--passphrase-stdin") out.stdin = true;
     else {
       console.error(`Unknown argument: ${arg}`);
@@ -149,7 +150,7 @@ async function main() {
   for (const name of names) {
     const id = basename(name, ".json");
     const obj = JSON.parse(await readFile(join(args.input, name), "utf8"));
-    const enc = await encryptJson(key, obj, id);
+    const enc = await encryptJson(key, obj, id, { compress: args.compress });
     const back = await decryptJson(key, enc, id);
     if (JSON.stringify(back) !== JSON.stringify(obj)) {
       console.error(`Round-trip check failed for ${name}`);
