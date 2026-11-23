@@ -8,6 +8,16 @@ export function escapeHtml(s) {
   }[c]));
 }
 
+const SITE = "https://takisraphael-ops.github.io/knowledge-compendium";
+
+let termLinker = null;
+
+/** Optional lookup: term string -> node id, used when rendering Term: definition runs. */
+export function setTermLinker(fn) {
+  termLinker = typeof fn === "function" ? fn : null;
+}
+
+
 function mapTextOutsideProtectedTags(html, fn) {
   const parts = String(html).split(/(<[^>]+>)/);
   let depth = 0;
@@ -74,6 +84,266 @@ function renderTable(rows) {
   return `<div class="table-wrap"><table>${headHtml}${bodyHtml}</table></div>`;
 }
 
+
+
+const TERM_SKIP = new Set([
+  "note", "notes", "example", "for example", "e.g.", "e.g", "i.e.", "i.e",
+  "see also", "warning", "tip", "hint", "remember", "important", "caution",
+  "defence", "defense", "defences", "defenses", "source", "update",
+  "please note", "nb", "n.b.", "ps", "p.s.", "important note", "trap",
+]);
+
+const TERM_START_SKIP = new Set([
+  "this", "the", "a", "an", "these", "those", "there", "it", "if", "when",
+  "what", "how", "why", "for", "and", "or", "but", "in", "on", "at", "to",
+  "of", "its", "their", "your", "our", "we", "you", "they", "please", "also",
+  "here",
+]);
+
+const FUNCTION_WORDS = new Set([
+  "and", "or", "of", "the", "for", "to", "in", "on", "a", "an", "vs", "vs.",
+  "by", "as", "at", "with", "from", "into", "via", "also", "simply",
+]);
+
+const TRAILING_HEADS = new Set([
+  "linux", "windows", "java", "macos", "android",
+]);
+
+// A single word in a term: letters (optional trademark), or a numeric token
+// such as 802.11 / 800-53. Periods are not allowed in letter-words so
+// "CSR. Hierarchy" cannot be one term.
+const TERM_WORD = "(?:[A-Za-z][A-Za-z0-9+_'’/-]*[™®©]*|[0-9]+(?:\\.[0-9]+)+|[0-9]+[A-Za-z0-9+_'’/-]*)";
+const TERM_BODY = TERM_WORD
+  + "(?:[ \\t]+" + TERM_WORD + "|,[ \\t]+" + TERM_WORD + "|\\s*\\([^\\)]{1,90}\\))*"
+  + "[ ™®©]*";
+
+const TERM_ANCHORED = new RegExp("^(?:" + TERM_BODY + ")$");
+
+function isSkipTerm(label) {
+  const raw = String(label || "").trim().replace(/[.:]+$/, "");
+  if (!raw) return true;
+  if (raw.length > 120) return true;
+  const lower = raw.toLowerCase();
+  if (TERM_SKIP.has(lower)) return true;
+  const words = raw.split(/\s+/);
+  if (words.length > 14) return true;
+  const first = words[0].toLowerCase().replace(/[.,:]+$/, "");
+  if (TERM_START_SKIP.has(first) && words.length >= 3) return true;
+  return false;
+}
+
+function firstWordOk(label, atStartOfText) {
+  const first = String(label || "").trim().split(/\s+/)[0] || "";
+  if (/^[A-Z]/.test(first)) return true;
+  if (atStartOfText && /^[a-z][a-z0-9+._-]*$/.test(first) && !/\s/.test(label.trim())) return true;
+  return false;
+}
+
+function tokenizeTerm(label) {
+  const out = [];
+  const re = /\([^)]+\)|[A-Za-z0-9+_'’./-]+[™®©]*|,/g;
+  let m;
+  while ((m = re.exec(String(label || "")))) out.push(m[0]);
+  return out;
+}
+
+function wordKind(tok) {
+  if (tok === ",") return "fn";
+  if (tok.startsWith("(") && tok.endsWith(")")) return "paren";
+  const bare = tok.replace(/[™®©]+$/g, "");
+  if (FUNCTION_WORDS.has(bare.toLowerCase())) return "fn";
+  if (/^\d/.test(bare)) return "num";
+  if (/^[A-Z]{2,6}s?$/.test(bare) || /^[A-Z]{2,}\/[A-Z]{2,}/.test(bare)) return "acr";
+  if (/^[A-Z]/.test(bare)) return "title";
+  return "lower";
+}
+
+function isWellFormedTerm(label) {
+  const tokens = tokenizeTerm(label);
+  if (!tokens.length) return false;
+  let mode = "title";
+  let prev = "";
+  for (let i = 0; i < tokens.length; i++) {
+    const k = wordKind(tokens[i]);
+    if (k === "title" && prev === "acr" && i > 0) {
+      const rest = tokens.slice(i + 1).filter((t) => wordKind(t) !== "fn");
+      const acrTok = tokens[i - 1] || "";
+      const twoLetter = /^[A-Z]{2}s?$/.test(acrTok.replace(/[™®©]+$/g, ""));
+      if (twoLetter || rest.length === 0) return false;
+    }
+    if (k === "title" && mode === "sentence") return false;
+    if (k === "lower") mode = "sentence";
+    if (k !== "fn" && k !== "paren") prev = k;
+  }
+  const first = tokens[0].replace(/[™®©]+$/g, "").toLowerCase();
+  if (TRAILING_HEADS.has(first) && tokens.length >= 2 && wordKind(tokens[1]) === "title") {
+    return false;
+  }
+  return true;
+}
+
+function packedBefore(text, index) {
+  if (index <= 0) return true;
+  if (/^\s+$/.test(text.slice(0, index))) return true;
+  const ch = text.slice(Math.max(0, index - 12), index);
+  return /[A-Za-z0-9)\]}'’”`]["']?[ \t]$/.test(ch) || /[A-Za-z0-9)'’”`][ \t]$/.test(ch);
+}
+
+function canStartTermAt(text, index, label, alreadyInRun) {
+  if (index <= 0) return true;
+  if (/^\s+$/.test(text.slice(0, index))) return true;
+  if (packedBefore(text, index) && firstWordOk(label, false)) return true;
+  const before = text.slice(Math.max(0, index - 12), index);
+  if (/[a-z]{3,}[.!?][ \t]$/.test(before)) {
+    const words = String(label || "").trim().split(/\s+/);
+    if (words.length >= 2) return true;
+    if (/\([^)]+\)/.test(label)) return true;
+    if (/[A-Z]{2,}/.test(label) || /[-/]/.test(label)) return true;
+    if (alreadyInRun && words.length === 1 && words[0].length >= 4) return true;
+  }
+  return false;
+}
+
+function backtickTerm(text, colonIndex) {
+  const window = text.slice(Math.max(0, colonIndex - 80), colonIndex);
+  const m = window.match(/`([A-Za-z][A-Za-z0-9+._/-]*)`$/);
+  if (!m) return null;
+  const absIdx = colonIndex - m[0].length;
+  if (absIdx < 0) return null;
+  return { index: absIdx, label: m[1] };
+}
+
+/** Longest well-formed term immediately before a ": " at colonIndex. */
+function findTermBefore(text, colonIndex) {
+  const tick = backtickTerm(text, colonIndex);
+  if (tick && packedBefore(text, tick.index)) return tick;
+  const windowStart = Math.max(0, colonIndex - 140);
+  const window = text.slice(windowStart, colonIndex);
+  let best = null;
+  for (let s = 0; s < window.length; s++) {
+    if (s > 0 && !/[\s,]$/.test(window[s - 1]) && window[s] !== "(") continue;
+    const cand = window.slice(s).trim();
+    if (!cand || !TERM_ANCHORED.test(cand) || isSkipTerm(cand)) continue;
+    if (!isWellFormedTerm(cand)) continue;
+    const absIdx = text.lastIndexOf(window.slice(s).replace(/^\s+/, ""), colonIndex - 1);
+    if (absIdx < 0) continue;
+    if (!firstWordOk(cand, absIdx === 0)) continue;
+    if (!canStartTermAt(text, absIdx, cand, true) && absIdx !== 0) continue;
+    const prep = text.slice(Math.max(0, absIdx - 8), absIdx);
+    if (/\b(?:for|in|with|using|to|by|from|of|via|into|onto)[ \t]$/i.test(prep)) continue;
+    if (!best || cand.length >= best.label.length) best = { index: absIdx, label: cand };
+  }
+  return best;
+}
+
+function findAllTermStarts(text) {
+  const found = [];
+  let from = 0;
+  while (from < text.length) {
+    const c = text.indexOf(": ", from);
+    if (c < 0) break;
+    const hit = findTermBefore(text, c);
+    if (hit && (found.length === 0 ? (hit.index === 0 || canStartTermAt(text, hit.index, hit.label, false)) : hit.index >= (found[found.length - 1].colon + 2))) {
+      found.push({ index: hit.index, label: hit.label, colon: c });
+    }
+    from = c + 2;
+  }
+  return found;
+}
+
+function peelTail(def) {
+  const src = String(def || "");
+  const m = src.match(/^([\s\S]*[.!?])[ \t]+([A-Z][\s\S]{15,})$/);
+  if (!m) return { def: src, tail: "" };
+  const tail = m[2].trim();
+  if (/^(And|Or|But|Then|This|That|It|They|These|Those|There|Also|So)\b/.test(tail)) {
+    return { def: src, tail: "" };
+  }
+  if (tail.includes(": ")) return { def: src, tail: "" };
+  return { def: m[1].trim(), tail };
+}
+
+function isGlossaryStyleDef(def) {
+  const d = String(def || "").trim();
+  if (/^(?:A|An|The|Software|Security|Unauthorized|Information|Hardware|Data|Malware)\b/.test(d)) return true;
+  if (/\b(?:designed|used to|type of|practice of)\b/i.test(d) && d.length < 400) return true;
+  return false;
+}
+
+const MISSING_COLON = /(?:^|(?<=[a-z0-9)\]'’”"]))\s([A-Z][A-Za-z0-9+_'’/-]*(?:[ \t]+[A-Za-z][a-z]+){0,4})[ \t]+((?:A|An|The)[ \t][\s\S]+)$/;
+
+function splitMissingColons(items) {
+  if (!items || items.length < 2) return items;
+  const out = [];
+  for (const item of items) {
+    const m = String(item.def || "").match(MISSING_COLON);
+    if (m && firstWordOk(m[1], false) && isWellFormedTerm(m[1])) {
+      const head = item.def.slice(0, item.def.lastIndexOf(m[1])).trim();
+      if (head) out.push({ term: item.term, def: head });
+      out.push({ term: m[1].trim(), def: m[2].trim() });
+    } else {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+/** Split a packed "Term: definition Term2: definition" paragraph into items. */
+export function parseTermRuns(text) {
+  const src = String(text || "");
+  if (!src.includes(": ") && !src.includes("`:")) return null;
+  const starts = findAllTermStarts(src);
+  if (!starts.length) return null;
+  const prefix = src.slice(0, starts[0].index).trim();
+  let items = starts.map((st, i) => {
+    const defStart = st.colon + 2;
+    const defEnd = i + 1 < starts.length ? starts[i + 1].index : src.length;
+    return { term: st.label, def: src.slice(defStart, defEnd).trim() };
+  });
+  items = splitMissingColons(items);
+  let tail = "";
+  if (items.length) {
+    const peeled = peelTail(items[items.length - 1].def);
+    items[items.length - 1].def = peeled.def;
+    tail = peeled.tail;
+  }
+  if (items.length >= 2 && termsLookLikeList(items)) return { prefix, items, tail };
+  if (items.length === 1 && !prefix && isGlossaryStyleDef(items[0].def)) {
+    return { prefix, items, tail };
+  }
+  return null;
+}
+
+function termsLookLikeList(items) {
+  if (!items || !items.length) return false;
+  // Dense glossary dumps are already well parsed; do not reject long official names.
+  if (items.length >= 4) return true;
+  const sentencey = /\b(is|are|was|were|deserves|releases|builds|means|includes|requires)\b/i;
+  const opener = /^(The|This|A|An|All|It|There|These|Those)\b/;
+  return items.every((it) => {
+    const words = String(it.term).trim().split(/\s+/);
+    if (words.length > 8 && !/\([^)]+\)/.test(it.term)) return false;
+    if (opener.test(it.term) && words.length >= 2) return false;
+    if (sentencey.test(it.term)) return false;
+    return true;
+  });
+}
+
+export function renderTermRuns(parsed) {
+  if (!parsed || !parsed.items || !parsed.items.length) return "";
+  const parts = [];
+  if (parsed.prefix) parts.push(`<p>${inline(parsed.prefix)}</p>`);
+  const rows = parsed.items.map((item) => {
+    const id = termLinker ? String(termLinker(item.term) || "").trim().replace(/^#/, "") : "";
+    const name = id
+      ? `<a class="term-run-link" href="${SITE}/#${escapeHtml(id)}">${inline(item.term)}</a>`
+      : `<span class="term-run-name">${inline(item.term)}</span>`;
+    return `<div class="term-item"><dt>${name}</dt><dd>${inline(item.def)}</dd></div>`;
+  }).join("");
+  parts.push(`<dl class="term-run">${rows}</dl>`);
+  if (parsed.tail) parts.push(`<p class="term-run-tail">${inline(parsed.tail)}</p>`);
+  return parts.join("");
+}
 
 function studyCalloutKind(title) {
   const t = String(title || "").replace(/[:.]+$/, "").trim();
@@ -149,6 +419,12 @@ function renderBlocks(lines, opts = {}) {
         i++;
       }
       html.push(`<ol>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ol>`);
+      continue;
+    }
+    const runs = parseTermRuns(trimmed);
+    if (runs) {
+      html.push(renderTermRuns(runs));
+      i++;
       continue;
     }
     html.push(`<p>${inline(trimmed)}</p>`);
@@ -400,6 +676,13 @@ function renderBlocksHighlighted(lines, marks) {
       html.push(`<ol>${items.join("")}</ol>`);
       continue;
     }
+    const runsH = parseTermRuns(trimmed);
+    if (runsH) {
+      const block = renderTermRuns(runsH);
+      html.push(marks.has(i) ? `<div class="own-passage-block">${block}</div>` : block);
+      i++;
+      continue;
+    }
     html.push(`<p>${wrapInline(trimmed, marks.has(i))}</p>`);
     i++;
   }
@@ -407,7 +690,6 @@ function renderBlocksHighlighted(lines, marks) {
 }
 
 const KEY_TERMS_LABEL = "Key terms";
-const SITE = "https://takisraphael-ops.github.io/knowledge-compendium";
 
 /** Compact Key terms block. Always rendered in the open panel, never behind More depth. */
 export function renderKeyTerms(node) {

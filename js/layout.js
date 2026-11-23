@@ -4,9 +4,9 @@
 // and for branches with dozens of children. Only the ids `isOpen` reveals
 // are measured, so a closed branch is a single pill.
 
-export const H_GAP = 72;
-export const V_GAP = 14;
-export const BRANCH_GAP = 46;
+export const H_GAP = 80;
+export const V_GAP = 18;
+export const BRANCH_GAP = 54;
 
 export function assignSides(rootId, children) {
   const kids = children.get(rootId) || [];

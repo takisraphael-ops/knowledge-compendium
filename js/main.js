@@ -35,7 +35,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "./model.js";
-import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderStudyLayers, renderLead, hasOriginalToggle, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
+import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -258,6 +258,56 @@ function passes(id) {
   return state.filter.has(id);
 }
 
+
+const LETTER_TITLE_RE = /^(?:glossary|course 1)\s+[–-]/i;
+
+function normTermKey(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[™®©]/g, "")
+    .replace(/[’']/g, "'")
+    .replace(/\s+/g, " ")
+    .replace(/[.:]+$/, "")
+    .trim();
+}
+
+function buildTermLinker(index) {
+  const map = new Map();
+  const add = (key, id, weight) => {
+    const k = normTermKey(key);
+    if (!k) return;
+    if (k.length < 3 && !/^[a-z0-9]{2,5}$/.test(k)) return;
+    if (LETTER_TITLE_RE.test(k)) return;
+    const prev = map.get(k);
+    if (prev && prev.weight >= weight) return;
+    map.set(k, { id, weight });
+  };
+  for (const [id, node] of index.byId) {
+    const title = node?.title || "";
+    if (LETTER_TITLE_RE.test(title)) continue;
+    add(title, id, 3);
+    const m = title.match(/^(.+?)\s+\(([^)]+)\)\s*$/);
+    if (m) {
+      add(m[1], id, 2);
+      const acr = m[2].trim();
+      if (/^[A-Za-z0-9][A-Za-z0-9+./-]{1,15}$/.test(acr)) add(acr, id, 2);
+    }
+  }
+  return (term) => {
+    const k = normTermKey(term);
+    if (!k) return "";
+    if (map.has(k)) return map.get(k).id;
+    const m = String(term || "").match(/^(.+?)\s+\(([^)]+)\)\s*$/);
+    if (m) {
+      const k1 = normTermKey(m[1]);
+      const k2 = normTermKey(m[2]);
+      if (map.has(k1)) return map.get(k1).id;
+      if (k2.length >= 2 && map.has(k2)) return map.get(k2).id;
+    }
+    return "";
+  };
+}
+
 function rebuildDerived() {
   const nodes = materialize(state.baseNodes, state.edits);
   state.index = buildIndex(nodes);
@@ -279,6 +329,7 @@ function rebuildDerived() {
   for (const id of [...state.expanded]) if (!alive.has(id)) state.expanded.delete(id);
   state.filter = idsPassingDocFilter(state.index, state.doc);
   fillDocFilter();
+  setTermLinker(state.index ? buildTermLinker(state.index) : null);
 }
 
 function branchColor(id) {
