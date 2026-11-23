@@ -344,3 +344,26 @@ function renderBlocksHighlighted(lines, marks) {
   }
   return html.join("");
 }
+
+const KEY_TERMS_LABEL = "Key terms";
+const SITE = "https://takisraphael-ops.github.io/knowledge-compendium";
+
+/** Compact Key terms block. Always rendered in the open panel, never behind More depth. */
+export function renderKeyTerms(node) {
+  const items = Array.isArray(node?.keyTerms) ? node.keyTerms : [];
+  if (!items.length) return "";
+  const rows = items.map((item) => {
+    const term = escapeHtml(item.term || "");
+    const def = escapeHtml(item.def || "");
+    const id = String(item.link || "").trim().replace(/^#/, "");
+    const name = id
+      ? `<a class="key-term-link" href="${SITE}/#${escapeHtml(id)}">${term}</a>`
+      : `<span class="key-term-name">${term}</span>`;
+    return `<div class="key-term"><dt>${name}</dt><dd>${def}</dd></div>`;
+  }).join("");
+  return `<details class="key-terms" open>
+    <summary class="key-terms-label">${KEY_TERMS_LABEL}</summary>
+    <dl class="key-terms-list">${rows}</dl>
+  </details>`;
+}
+

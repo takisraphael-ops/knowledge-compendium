@@ -18,6 +18,34 @@ export const DOC_NAMES = {
 
 const CORE = ["id", "title", "parentId", "summary", "text", "tidy", "expanded", "docs", "tags"];
 
+/** Normalise an optional per-topic Key terms list: [{term, def, link?}]. */
+export function normalizeKeyTerms(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const term = String(item.term ?? "").trim();
+    const def = String(item.def ?? "").trim();
+    if (!term || !def) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const rec = { term, def };
+    const link = String(item.link ?? "").trim().replace(/^#/, "");
+    if (link) rec.link = link;
+    out.push(rec);
+  }
+  return out.length ? out : undefined;
+}
+
+function keyTermsEqual(a, b) {
+  const aa = Array.isArray(a) ? a : [];
+  const bb = Array.isArray(b) ? b : [];
+  if (aa.length !== bb.length) return false;
+  return aa.every((item, i) => item.term === bb[i].term && item.def === bb[i].def && (item.link || "") === (bb[i].link || ""));
+}
+
 export function docLabel(code) {
   return DOC_NAMES[code] || code;
 }
@@ -44,6 +72,8 @@ export function normalizeNode(raw) {
   const sids = Array.isArray(n.sectionIds) ? n.sectionIds.map(String).filter(Boolean)
     : (n.sectionId ? [String(n.sectionId)] : []);
   if (sids.length) node.sectionIds = sids;
+  const keyTerms = normalizeKeyTerms(n.keyTerms);
+  if (keyTerms) node.keyTerms = keyTerms;
   return node;
 }
 
@@ -64,6 +94,10 @@ export function normalizeEdits(raw) {
       for (const [k, v] of Object.entries(patch)) {
         if (k === "docs" || k === "tags") clean[k] = Array.isArray(v) ? v.map(String) : [];
         else if (k === "parentId") clean[k] = v == null || v === "" ? null : String(v);
+        else if (k === "keyTerms") {
+          const terms = normalizeKeyTerms(v);
+          if (terms) clean[k] = terms;
+        }
         else if (CORE.includes(k) || k === "link" || k === "linkLabel") clean[k] = v == null ? "" : String(v);
       }
       if (Object.keys(clean).length) changed[String(id)] = clean;
@@ -224,7 +258,10 @@ export function idsPassingDocFilter(index, doc) {
 }
 
 export function searchBlob(node) {
-  return [node.title, node.summary, node.text, node.tidy || "", node.expanded || "", ...(node.docs || []), ...(node.tags || [])]
+  const keyTerms = Array.isArray(node.keyTerms)
+    ? node.keyTerms.flatMap((item) => [item.term || "", item.def || "", item.link || ""])
+    : [];
+  return [node.title, node.summary, node.text, node.tidy || "", node.expanded || "", ...(node.docs || []), ...(node.tags || []), ...keyTerms]
     .join("\n")
     .toLowerCase();
 }
@@ -255,5 +292,9 @@ export function diffNode(base, next) {
   }
   if (!listsEqual(base?.docs || [], next?.docs || [])) patch.docs = (next?.docs || []).slice();
   if (!listsEqual(base?.tags || [], next?.tags || [])) patch.tags = (next?.tags || []).slice();
+  if (!keyTermsEqual(base?.keyTerms, next?.keyTerms)) {
+    const terms = normalizeKeyTerms(next?.keyTerms);
+    patch.keyTerms = terms || [];
+  }
   return patch;
 }

@@ -5,6 +5,7 @@
   --line: #e3ddd2;
   --panel: #fffcf8;
   --teal: #0f6e6b;
+  --ink-soft: #3d4a63;
   --danger: #9f2d2d;
   --shadow: 0 1px 2px rgba(28, 36, 48, 0.06), 0 10px 28px rgba(28, 36, 48, 0.06);
   --sans: "Liberation Sans", "Segoe UI", Helvetica, Arial, sans-serif;
@@ -498,6 +499,78 @@ h1 .added-badge { font-weight: 700; }
 }
 .study-callout-memory > .study-callout-label { color: #7a5d00; }
 
+/* Per-topic Key terms: always visible at the bottom of the explanation. */
+.key-terms {
+  margin: 14px 0 4px;
+  background: #f3f5fa;
+  border: 1px solid #d7dce8;
+  border-left: 3px solid #3d5a80;
+  border-radius: 10px;
+  padding: 2px 12px 10px;
+}
+.key-terms > .key-terms-label,
+.key-terms > summary.key-terms-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #3d5a80;
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 0 6px;
+}
+.key-terms > summary.key-terms-label::-webkit-details-marker { display: none; }
+.key-terms > summary.key-terms-label::before {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 0.45em;
+  margin-right: 0.5em;
+  border-right: 2px solid #3d5a80;
+  border-bottom: 2px solid #3d5a80;
+  transform: rotate(45deg) translateY(-1px);
+  transition: transform 120ms ease;
+}
+.key-terms[open] > summary.key-terms-label::before {
+  transform: rotate(225deg) translateY(-1px);
+}
+.key-terms-list {
+  margin: 0;
+  padding: 0 0 2px;
+}
+.key-term {
+  display: grid;
+  gap: 2px;
+  padding: 6px 0;
+  border-top: 1px solid #e4e8f0;
+}
+.key-term:first-child { border-top: 0; }
+.key-term dt {
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1.35;
+  color: var(--ink);
+}
+.key-term dd {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.key-term-link {
+  color: #2a4a78;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+.key-term-link:hover { color: var(--teal); }
+.key-term-name { color: var(--ink); }
+@media (max-width: 860px) {
+  .key-terms { margin: 12px 0 2px; padding: 2px 12px 12px; }
+  .key-terms > summary.key-terms-label { padding: 10px 0 8px; min-height: 44px; display: flex; align-items: center; }
+  .key-term { padding: 8px 0; }
+}
+
 .notes h4 { font-size: 0.95rem; color: #24343a; }
 .notes ul, .notes ol { margin: 0 0 0.75em; padding-left: 1.2em; }
 .notes li { margin: 0.18em 0; }
@@ -614,7 +687,8 @@ h1 .added-badge { font-weight: 700; }
   #panel .your-notes,
   #panel .expanded-block,
   #panel .full-notes,
-  #panel .grokimus-open {
+  #panel .grokimus-open,
+  #panel .key-terms {
     width: 100%;
     max-width: none;
   }

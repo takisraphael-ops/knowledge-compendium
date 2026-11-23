@@ -35,7 +35,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "./model.js";
-import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, hasOriginalToggle, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
+import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, hasOriginalToggle, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -1135,6 +1135,7 @@ function renderPanel() {
     ${yourNotes}
     ${more}
     ${fullNotes}
+    ${renderKeyTerms(node)}
     ${kidLinks ? `<h2 class="subhead">Subtopics</h2><div class="subtopics">${kidLinks}</div>` : ""}
     <div class="row-actions">
       <button type="button" data-act="edit">Edit</button>
