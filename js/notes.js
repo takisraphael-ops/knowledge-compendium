@@ -77,7 +77,7 @@ function renderTable(rows) {
 
 function studyCalloutKind(title) {
   const t = String(title || "").replace(/[:.]+$/, "").trim();
-  if (/^exam tips?$/i.test(t)) return "exam";
+  if (/^exam tips?$/i.test(t) || /^exam point$/i.test(t) || /^exam clue$/i.test(t)) return "exam";
   if (/^memory aids?$/i.test(t)) return "memory";
   return "";
 }
@@ -100,7 +100,7 @@ function collectUntilHeading(lines, start, level) {
   return { inner, next: i };
 }
 
-function renderBlocks(lines) {
+function renderBlocks(lines, opts = {}) {
   const html = [];
   let i = 0;
   while (i < lines.length) {
@@ -111,10 +111,10 @@ function renderBlocks(lines) {
     }
     const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
-      const kind = studyCalloutKind(heading[2]);
+      const kind = opts.studyCallouts === false ? "" : studyCalloutKind(heading[2]);
       if (kind) {
         const { inner, next } = collectUntilHeading(lines, i + 1, heading[1].length);
-        html.push(wrapStudyCallout(kind, renderBlocks(inner)));
+        html.push(wrapStudyCallout(kind, renderBlocks(inner, opts)));
         i = next;
         continue;
       }
@@ -157,14 +157,14 @@ function renderBlocks(lines) {
   return html.join("");
 }
 
-function renderSection(section) {
-  const inner = renderBlocks(section.lines);
+function renderSection(section, opts = {}) {
+  const inner = renderBlocks(section.lines, opts);
   if (!section.label) return inner;
   return `<section class="src-block"><div class="src-label">${inline(section.label)}</div>${inner}</section>`;
 }
 
 /** Render compendium note text: @@ source blocks, headings, bullets, tables. */
-export function renderNotes(text) {
+export function renderNotes(text, opts = {}) {
   const lines = String(text || "").replace(/\u200b/g, "").replace(/\r\n/g, "\n").split("\n");
   const sections = [{ label: "", lines: [] }];
   for (const raw of lines) {
@@ -173,7 +173,7 @@ export function renderNotes(text) {
     if (mark) sections.push({ label: mark[1].trim(), lines: [] });
     else sections[sections.length - 1].lines.push(line);
   }
-  return sections.map(renderSection).join("");
+  return sections.map((section) => renderSection(section, opts)).join("");
 }
 
 export const EXPANDED_LABEL = "Expanded explanation (added by Grokimus)";
@@ -198,20 +198,81 @@ export function hasOriginalToggle(node) {
 
 export function renderYourNotes(node, showOriginal = false) {
   const body = displayNotes(node, showOriginal);
-  return body ? renderNotes(body) : "";
+  // Owner notes keep ordinary headings; official Exam tips / Memory aids live in the study stack.
+  return body ? renderNotes(body, { studyCallouts: false }) : "";
 }
 
-/** Expanded explanation only (shown under More depth). */
-export function renderExpanded(node) {
-  if (node.expanded && String(node.expanded).trim()) {
-    return `<section class="expanded-block"><div class="expanded-label">${escapeHtml(EXPANDED_LABEL)}</div>${renderNotes(node.expanded)}</section>`;
+const STUDY_HEADING_RE = /^###\s+(Exam tips|Exam point|Exam clue|Memory aids|Practice)\s*$/gim;
+
+/** Split a Grokimus expanded note into the teaching lead and study layers. */
+export function splitExpanded(text) {
+  const src = String(text || "").replace(/\r\n/g, "\n");
+  const headings = [];
+  const re = new RegExp(STUDY_HEADING_RE.source, "gim");
+  let m;
+  while ((m = re.exec(src))) {
+    headings.push({ name: m[1].toLowerCase(), start: m.index, headEnd: m.index + m[0].length });
   }
-  return "";
+  const out = { lead: src, exam: "", memory: "", practice: "" };
+  if (!headings.length) return out;
+  out.lead = src.slice(0, headings[0].start).replace(/\s+$/, "\n");
+  const keyOf = (n) => (n.startsWith("exam") ? "exam" : n.startsWith("memory") ? "memory" : "practice");
+  for (let i = 0; i < headings.length; i++) {
+    const end = i + 1 < headings.length ? headings[i + 1].start : src.length;
+    out[keyOf(headings[i].name)] = src.slice(headings[i].headEnd, end).replace(/^\n+/, "").replace(/\s+$/, "\n");
+  }
+  return out;
 }
 
-/** Back-compat: depth box is now the expanded explanation only. */
+function splitPractice(body) {
+  const lines = String(body || "").replace(/\r\n/g, "\n").split("\n");
+  const isAnswers = (line) => /^(?:#{1,6}\s+)?\*{0,2}Answers\*{0,2}\s*$/i.test(line.trim());
+  const isSeeAlso = (line) => /^(?:\*\*)?See also:/i.test(line.trim());
+  const idx = lines.findIndex(isAnswers);
+  if (idx < 0) return { questions: body, answers: "", after: "" };
+  const questions = lines.slice(0, idx).join("\n");
+  const rest = lines.slice(idx + 1);
+  const see = rest.findIndex(isSeeAlso);
+  if (see < 0) return { questions, answers: rest.join("\n"), after: "" };
+  return { questions, answers: rest.slice(0, see).join("\n"), after: rest.slice(see).join("\n") };
+}
+
+function renderPractice(body) {
+  if (!String(body || "").trim()) return "";
+  const { questions, answers, after } = splitPractice(body);
+  const qHtml = questions.trim() ? renderNotes(questions) : "";
+  const aHtml = answers.trim()
+    ? `<details class="practice-answers"><summary>Show answers</summary><div class="practice-answers-body">${renderNotes(answers)}</div></details>`
+    : "";
+  const afterHtml = after.trim() ? renderNotes(after) : "";
+  return `<section class="study-callout study-callout-practice"><div class="study-callout-label">Practice</div>${qHtml}${aHtml}${afterHtml}</section>`;
+}
+
+/** Teaching lead only (before Exam tips). Used under More depth, or open when there are no owner notes. */
+export function renderLead(node) {
+  const { lead } = splitExpanded(node?.expanded || "");
+  if (!lead.trim()) return "";
+  return `<section class="expanded-block"><div class="expanded-label">Further explanation</div>${renderNotes(lead)}</section>`;
+}
+
+/** Expanded explanation only (shown under More depth). Study layers are rendered separately, always open. */
+export function renderExpanded(node) {
+  return renderLead(node);
+}
+
+/** Back-compat: depth box is the teaching lead only. */
 export function renderDepth(node) {
-  return renderExpanded(node);
+  return renderLead(node);
+}
+
+/** Exam tips, Memory aids and Practice, always visible in the panel flow. */
+export function renderStudyLayers(node) {
+  const parts = splitExpanded(node?.expanded || "");
+  const exam = parts.exam.trim() ? wrapStudyCallout("exam", renderNotes(parts.exam)) : "";
+  const memory = parts.memory.trim() ? wrapStudyCallout("memory", renderNotes(parts.memory)) : "";
+  const practice = renderPractice(parts.practice);
+  if (!exam && !memory && !practice) return "";
+  return `<div class="study-stack">${exam}${memory}${practice}</div>`;
 }
 
 export const FULL_NOTES_LABEL = "Full notes (from your original document)";
@@ -263,7 +324,7 @@ export function renderFullNotes(sections, node, docLabel) {
       lines.forEach((ln, i) => { if (shouldHighlightLine(ln, hay)) marks.add(i); });
     }
     const usable = marks.size > 0 && marks.size < Math.max(3, Math.floor(lines.length * 0.8));
-    const body = usable ? renderNotesHighlighted(lines, marks) : renderNotes(sec.text);
+    const body = usable ? renderNotesHighlighted(lines, marks) : renderNotes(sec.text, { studyCallouts: false });
     const hint = usable
       ? `<p class="full-notes-hint">Highlighted text is the passage this topic was taken from.</p>`
       : "";
