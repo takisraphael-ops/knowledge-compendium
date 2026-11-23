@@ -15,10 +15,12 @@ import {
   idsPassingDocFilter,
   materialize,
   normalizeEdits,
+  normalizeNode,
+  searchBlob,
   subtreeIds,
   wouldCycle,
 } from "../js/model.js";
-import { renderNotes } from "../js/notes.js";
+import { renderNotes, renderKeyTerms } from "../js/notes.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 let failed = 0;
@@ -56,6 +58,22 @@ check("subtree", subtreeIds(index, "a").sort().join() === ["a", "n1"].sort().joi
 const keep = idsPassingDocFilter(index, "OV");
 check("doc filter", keep.has("a") && keep.has("root") && !keep.has("n1"));
 check("edit count", editCount(edits) === 3 && editCount(emptyEdits()) === 0);
+
+const withTerms = normalizeNode({
+  id: "kt", title: "Key terms test", parentId: "root",
+  keyTerms: [
+    { term: "MFA (multi-factor authentication)", def: "Two different factor types.", link: "c48" },
+    { term: "  ", def: "skip" },
+    { def: "no term" },
+  ],
+});
+check("keyTerms kept", Array.isArray(withTerms.keyTerms) && withTerms.keyTerms.length === 1 && withTerms.keyTerms[0].link === "c48");
+check("keyTerms dropped when empty", !("keyTerms" in normalizeNode({ id: "x", title: "X" })));
+const ktBlob = searchBlob(withTerms);
+check("searchBlob includes keyTerms", ktBlob.includes("multi-factor authentication") && ktBlob.includes("two different factor types"));
+const ktHtml = renderKeyTerms(withTerms);
+check("renderKeyTerms block", ktHtml.includes("key-terms") && ktHtml.includes("open") && ktHtml.includes("c48") && ktHtml.includes("Two different factor types."));
+check("renderKeyTerms empty", renderKeyTerms({ id: "z" }) === "");
 
 function chain(n, prefix) {
   const nodes = [{ id: "root", title: "Root", parentId: null }];
