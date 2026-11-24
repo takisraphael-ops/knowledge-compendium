@@ -72,6 +72,7 @@ export function isUnder(index, ancestorId, id) {
 }
 
 export function formatHash({ mode, slug, focusId, selectedId, subjectRootId }) {
+  if (mode === "revise") return "#/revise";
   if (mode === "overview" || !slug) return "#/";
   const focus = focusId && focusId !== subjectRootId ? focusId : null;
   const sel = selectedId && selectedId !== (focus || subjectRootId) ? selectedId : null;
@@ -107,6 +108,10 @@ export function parseHash(hash, { index, subjects, redirects } = {}) {
     try { return decodeURIComponent(p); } catch { return p; }
   });
   if (!parts.length) return { mode: "overview", slug: null, focusId: null, selectedId: null };
+
+  if (parts[0] === "revise") {
+    return { mode: "revise", slug: null, focusId: null, selectedId: null };
+  }
 
   const subject = bySlug.get(parts[0]);
   if (!subject) {
