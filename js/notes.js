@@ -437,7 +437,8 @@ function studyCalloutKind(title) {
 
 function wrapStudyCallout(kind, innerHtml) {
   const label = kind === "exam" ? "Exam tips" : "Memory aids";
-  return `<section class="study-callout study-callout-${kind}"><div class="study-callout-label">${label}</div>${innerHtml}</section>`;
+  const id = kind === "exam" ? "panel-exam-tips" : "panel-memory-aids";
+  return `<section id="${id}" class="study-callout study-callout-${kind}"><div class="study-callout-label">${label}</div>${innerHtml}</section>`;
 }
 
 function collectUntilHeading(lines, start, level) {
@@ -613,7 +614,7 @@ function renderPractice(body) {
   const aHtml = answers.trim()
     ? `<details class="practice-answers"><summary>Show answers</summary><div class="practice-answers-body">${renderNotes(answers)}</div></details>`
     : "";
-  const html = `<section class="study-callout study-callout-practice"><div class="study-callout-label">Practice</div>${qHtml}${aHtml}</section>`;
+  const html = `<section id="panel-practice" class="study-callout study-callout-practice"><div class="study-callout-label">Practice</div>${qHtml}${aHtml}</section>`;
   return { html, seeAlso: after };
 }
 
@@ -796,7 +797,7 @@ export function renderKeyTerms(node) {
       : `<span class="key-term-name">${term}</span>`;
     return `<div class="key-term"><dt>${name}</dt><dd>${def}</dd></div>`;
   }).join("");
-  return `<details class="key-terms" open>
+  return `<details id="panel-key-terms" class="key-terms" open>
     <summary class="key-terms-label">${KEY_TERMS_LABEL}</summary>
     <dl class="key-terms-list">${rows}</dl>
   </details>`;

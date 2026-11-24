@@ -1082,6 +1082,74 @@ function fillFullNotes(node) {
   body.dataset.ready = "1";
 }
 
+
+const PHONE_READER = "(max-width: 700px)";
+
+function isPhoneReader() {
+  return window.matchMedia(PHONE_READER).matches;
+}
+
+function closeMoreMenu() {
+  const menu = els.panel?.querySelector(".panel-more-menu");
+  const btn = els.panel?.querySelector(".panel-more-btn");
+  if (menu) menu.hidden = true;
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+
+function toggleMoreMenu(btn) {
+  const menu = els.panel?.querySelector(".panel-more-menu");
+  if (!menu || !btn) return;
+  const open = menu.hidden;
+  menu.hidden = !open;
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function syncPanelStickyHeight() {
+  const top = els.panel?.querySelector(".panel-top");
+  if (!els.panel) return;
+  if (!top) {
+    els.panel.style.removeProperty("--panel-sticky-h");
+    return;
+  }
+  els.panel.style.setProperty("--panel-sticky-h", `${Math.ceil(top.getBoundingClientRect().height)}px`);
+}
+
+function syncPhoneReaderChrome() {
+  const on = isPhoneReader() && Boolean(state.selected) && els.panel?.classList.contains("open");
+  document.body.classList.toggle("phone-reader", on);
+  const inertTargets = [
+    document.querySelector("#app > header"),
+    els.viewport,
+    ...document.querySelectorAll(".map-controls, #hint"),
+  ];
+  for (const el of inertTargets) {
+    if (!el) continue;
+    if (on) el.setAttribute("inert", "");
+    else el.removeAttribute("inert");
+  }
+}
+
+function jumpBarHtml(items) {
+  if (!items.length) return "";
+  const buttons = items.map((item) => (
+    `<button type="button" class="jump-link" data-act="jump" data-target="${item.id}">${item.label}</button>`
+  )).join("");
+  return `<nav class="jump-bar" aria-label="On this topic">${buttons}</nav>`;
+}
+
+function moreMenuHtml(id) {
+  const isRoot = id === state.index.rootId;
+  return `<div class="panel-more">
+      <button type="button" class="icon-btn panel-more-btn" data-act="toggle-more" aria-expanded="false" aria-haspopup="menu" aria-label="More actions">⋯</button>
+      <div class="panel-more-menu" hidden role="menu">
+        <button type="button" role="menuitem" data-act="edit">Edit</button>
+        <button type="button" role="menuitem" data-act="add">Add subtopic</button>
+        ${isRoot ? "" : `<button type="button" role="menuitem" data-act="move">Move</button>
+        <button type="button" role="menuitem" class="danger" data-act="delete">Delete</button>`}
+      </div>
+    </div>`;
+}
+
 function renderPanel() {
   const id = state.selected;
   if (!id || !state.index.byId.has(id)) {
@@ -1093,6 +1161,8 @@ function renderPanel() {
         <p>${escapeHtml(root?.summary || "Select a topic on the map.")}</p>
         <p class="muted">${state.index.byId.size} topics. Click a branch to open it. Scroll to zoom, drag to move.</p>
       </div>`;
+    syncPanelStickyHeight();
+    syncPhoneReaderChrome();
     return;
   }
   const node = state.index.byId.get(id);
@@ -1127,6 +1197,7 @@ function renderPanel() {
       <div class="panel-top">
         <div class="panel-bar"><button type="button" class="textish" data-act="cancel-edit">Cancel</button><span>Edit topic</span><button type="button" class="textish strong" data-act="save">Save</button></div>
       </div>
+      <div class="panel-body">
       <label class="field">Title<input id="f-title" value="${escapeHtml(node.title)}"></label>
       <label class="field">Summary<textarea id="f-summary" rows="3">${escapeHtml(node.summary)}</textarea></label>
       <label class="field">Your notes <span class="hint-text">tidied version, shown first on the topic</span><textarea id="f-tidy" rows="12">${escapeHtml(node.tidy || node.text || "")}</textarea></label>
@@ -1135,7 +1206,10 @@ function renderPanel() {
       <p class="hint-text">Lines that start with @@ name a source. ### is a heading, “- ” is a bullet, and “| a | b |” is a table.</p>
       <label class="field">Sources <span class="hint-text">codes, comma separated</span><input id="f-docs" value="${escapeHtml((node.docs || []).join(", "))}"></label>
       <label class="field">Tags<input id="f-tags" value="${escapeHtml((node.tags || []).join(", "))}"></label>
-      <div class="row-actions"><button type="button" class="solid" data-act="save">Save on this device</button></div>`;
+      <div class="row-actions"><button type="button" class="solid" data-act="save">Save on this device</button></div>
+      </div>`;
+    syncPanelStickyHeight();
+    syncPhoneReaderChrome();
     return;
   }
 
@@ -1175,28 +1249,40 @@ function renderPanel() {
        </details>`
     : "";
 
+  const keyTermsHtml = renderKeyTerms(node);
+  const jumpItems = [];
+  if (node.summary || ownNotes || hasLead) jumpItems.push({ id: "panel-explanation", label: "Explanation" });
+  if (studyLayers.includes("id=\"panel-exam-tips\"")) jumpItems.push({ id: "panel-exam-tips", label: "Exam tips" });
+  if (studyLayers.includes("id=\"panel-memory-aids\"")) jumpItems.push({ id: "panel-memory-aids", label: "Memory aids" });
+  if (studyLayers.includes("id=\"panel-practice\"")) jumpItems.push({ id: "panel-practice", label: "Practice" });
+  if (keyTermsHtml) jumpItems.push({ id: "panel-key-terms", label: "Key terms" });
+
   els.panel.innerHTML = `
     <div class="panel-top" style="--c:${branchColor(id)}">
       <div class="panel-bar">
-        <button type="button" class="icon-btn" data-act="close-panel" aria-label="Close">×</button>
+        <button type="button" class="panel-back" data-act="close-panel" aria-label="Back to map">
+          <span class="panel-back-label">Map</span>
+          <span class="panel-back-x" aria-hidden="true">×</span>
+        </button>
         <div class="crumbs">${crumbHtml}</div>
+        ${moreMenuHtml(id)}
       </div>
       <h1>${escapeHtml(node.title)}${grokBadge}</h1>
+      ${jumpBarHtml(jumpItems)}
     </div>
+    <div class="panel-body">
     ${hiddenNote}${orphanNote}
+    <div id="panel-explanation">
     ${node.summary ? `<p class="summary">${escapeHtml(node.summary)}</p>` : ""}
     ${link}
     ${docs || tags ? `<div class="chips">${docs}${tags}</div>` : ""}
     ${yourNotes}
     ${more}
+    </div>
     ${studyLayers}
-    ${renderKeyTerms(node)}
+    ${keyTermsHtml}
     ${fullNotes}
     ${kidLinks ? `<h2 class="subhead">Subtopics</h2><div class="subtopics">${kidLinks}</div>` : ""}
-    <div class="row-actions">
-      <button type="button" data-act="edit">Edit</button>
-      <button type="button" data-act="add">Add subtopic</button>
-      ${id === state.index.rootId ? "" : `<button type="button" data-act="move">Move</button><button type="button" class="danger" data-act="delete">Delete</button>`}
     </div>`;
 
   const notesBody = $("your-notes-body");
@@ -1206,6 +1292,10 @@ function renderPanel() {
     if (box) box.innerHTML = renderDepth(node);
   }
   if (state.fullNotesOpen && fullSecs.length) fillFullNotes(node);
+  requestAnimationFrame(() => {
+    syncPanelStickyHeight();
+    syncPhoneReaderChrome();
+  });
 }
 
 function readList(value) {
@@ -1515,6 +1605,16 @@ function onPanelClick(e) {
   if (act === "open") select(btn.dataset.id, { toggle: true });
   else if (act === "close-panel") {
     clearSelection({ push: true });
+  } else if (act === "toggle-more") {
+    e.stopPropagation();
+    toggleMoreMenu(btn);
+  } else if (act === "jump") {
+    const target = document.getElementById(btn.dataset.target);
+    if (target && els.panel) {
+      const sticky = els.panel.querySelector(".panel-top")?.getBoundingClientRect().height || 0;
+      const y = target.getBoundingClientRect().top - els.panel.getBoundingClientRect().top + els.panel.scrollTop - sticky - 8;
+      els.panel.scrollTo({ top: Math.max(0, y), behavior: "smooth" });
+    }
   } else if (act === "wording") {
     state.showOriginal = !state.showOriginal;
     const node = state.index.byId.get(state.selected);
@@ -1669,7 +1769,7 @@ function wireCamera() {
 
 
 const PANEL_WIDTH_KEY = "kc-panel-width";
-const PANEL_DESKTOP = "(min-width: 861px)";
+const PANEL_DESKTOP = "(min-width: 701px)";
 
 function isDesktopPanel() {
   return window.matchMedia(PANEL_DESKTOP).matches;
@@ -1782,6 +1882,18 @@ function wireChrome() {
   wirePanelResize();
   els.panel.addEventListener("click", onPanelClick);
   els.panel.addEventListener("click", onAppLinkClick);
+  document.addEventListener("click", (e) => {
+    const wrap = els.panel?.querySelector(".panel-more");
+    if (!wrap || wrap.contains(e.target)) return;
+    closeMoreMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeMoreMenu();
+  });
+  window.addEventListener("resize", () => {
+    syncPanelStickyHeight();
+    syncPhoneReaderChrome();
+  });
   els.breadcrumb?.addEventListener("click", onBreadcrumbClick);
   els.subjectSwitch?.addEventListener("change", onSubjectSwitch);
   window.addEventListener("popstate", () => {
