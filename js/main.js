@@ -36,6 +36,7 @@ import {
   wouldCycle,
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
+import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession } from "./revise.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -82,6 +83,8 @@ const els = {
   editsBtn: $("edits-btn"),
   editsMenu: $("edits-menu"),
   lockBtn: $("lock-btn"),
+  reviseBtn: $("revise-btn"),
+  revise: $("revise"),
   viewport: $("viewport"),
   world: $("world"),
   edges: $("edges"),
@@ -580,6 +583,26 @@ function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
+function openRevise({ push = true } = {}) {
+  if (!state.index) return;
+  if (state.mode !== "revise") state.reviseReturn = currentRoute();
+  state.mode = "revise";
+  writeRoute({ push });
+  showRevise();
+  renderNav();
+}
+
+function leaveRevise() {
+  const ret = state.reviseReturn;
+  state.reviseReturn = null;
+  hideRevise();
+  if (ret && ret.mode && ret.mode !== "revise") {
+    history.back();
+    return;
+  }
+  openOverview({ push: false, fitMap: true });
+}
+
 function applyRoute({ fitMap = false } = {}) {
   if (!state.index) return;
   const parsed = parseHash(location.hash, { index: state.index, subjects: state.subjects, redirects: state.redirects });
@@ -594,6 +617,14 @@ function applyRoute({ fitMap = false } = {}) {
     }));
     routeApplying = false;
   }
+  if (parsed.mode === "revise") {
+    state.mode = "revise";
+    showRevise();
+    renderNav();
+    return;
+  }
+  if (state.mode === "revise" || isReviseVisible()) hideRevise();
+
   const prevMode = state.mode;
   const prevFocus = state.focusId;
   const prevSlug = state.slug;
@@ -639,6 +670,8 @@ function applyRoute({ fitMap = false } = {}) {
 }
 
 function openOverview({ push = true, fitMap = true } = {}) {
+  if (isReviseVisible()) hideRevise();
+
   state.mode = "overview";
   state.slug = null;
   state.focusId = state.index.rootId;
@@ -656,6 +689,8 @@ function openOverview({ push = true, fitMap = true } = {}) {
 }
 
 function openSubject(slug, { focusId = null, selectedId = null, push = true, fitMap = true } = {}) {
+  if (isReviseVisible()) hideRevise();
+
   const subject = subjectBySlug(slug);
   if (!subject) {
     openOverview({ push, fitMap });
@@ -695,6 +730,8 @@ function openSubject(slug, { focusId = null, selectedId = null, push = true, fit
 }
 
 function openNode(id, { push = true } = {}) {
+  if (isReviseVisible()) hideRevise();
+
   if (!id || !state.index?.byId.has(id)) return;
   if (id === state.index.rootId) {
     openOverview({ push });
@@ -769,7 +806,10 @@ function renderNav() {
   if (!els.breadcrumb || !state.index) return;
   const crumbs = [];
   crumbs.push({ kind: "home", label: "Home", current: state.mode === "overview" && !state.selected });
-  if (state.mode === "subject" && state.slug) {
+  if (state.mode === "revise") {
+    crumbs[0].current = false;
+    crumbs.push({ kind: "revise", label: "Revise", current: true });
+  } else if (state.mode === "subject" && state.slug) {
     const subject = subjectBySlug(state.slug);
     const subjectRoot = subject?.rootId;
     const trailEnd = state.selected || (state.focusId && state.focusId !== subjectRoot ? state.focusId : null);
@@ -849,10 +889,12 @@ function renderNav() {
       els.subjectSwitch.innerHTML = html;
       els.subjectSwitch.dataset.html = html;
     }
-    const want = state.mode === "subject" && state.slug ? state.slug : "";
+    const want = (state.mode === "subject" || state.mode === "revise") && state.slug ? state.slug : "";
     if (els.subjectSwitch.value !== want) els.subjectSwitch.value = want;
   }
-  document.title = state.mode === "subject" && subjectBySlug(state.slug)
+  document.title = state.mode === "revise"
+    ? "Revise · Knowledge Compendium"
+    : state.mode === "subject" && subjectBySlug(state.slug)
     ? `${subjectBySlug(state.slug).title} · Knowledge Compendium`
     : (state.index.byId.get(state.index.rootId)?.title || "Knowledge Compendium");
 }
@@ -1879,6 +1921,17 @@ function wirePanelResize() {
 }
 
 function wireChrome() {
+  initRevise({
+    els: { revise: els.revise, reviseBtn: els.reviseBtn },
+    getState: () => state,
+    openNode,
+    leaveRevise,
+    toast,
+  });
+  els.reviseBtn?.addEventListener("click", () => {
+    if (state.mode === "revise") leaveRevise();
+    else openRevise({ push: true });
+  });
   wirePanelResize();
   els.panel.addEventListener("click", onPanelClick);
   els.panel.addEventListener("click", onAppLinkClick);
@@ -2120,6 +2173,7 @@ async function openCompendium(key) {
 }
 
 function lock() {
+  clearReviseSession();
   state.key = null;
   state.baseNodes = [];
   state.sections = {};
