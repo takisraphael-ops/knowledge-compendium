@@ -606,15 +606,16 @@ function leaveRevise() {
 function applyRoute({ fitMap = false } = {}) {
   if (!state.index) return;
   const parsed = parseHash(location.hash, { index: state.index, subjects: state.subjects, redirects: state.redirects });
-  if (parsed.legacy) {
+  const canonical = formatHash({
+    mode: parsed.mode,
+    slug: parsed.slug,
+    focusId: parsed.focusId,
+    selectedId: parsed.selectedId,
+    subjectRootId: subjectBySlug(parsed.slug)?.rootId || null,
+  });
+  if (normalizeHash(location.hash) !== normalizeHash(canonical)) {
     routeApplying = true;
-    history.replaceState(null, "", formatHash({
-      mode: parsed.mode,
-      slug: parsed.slug,
-      focusId: parsed.focusId,
-      selectedId: parsed.selectedId,
-      subjectRootId: subjectBySlug(parsed.slug)?.rootId || null,
-    }));
+    history.replaceState(null, "", canonical);
     routeApplying = false;
   }
   if (parsed.mode === "revise") {
