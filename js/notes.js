@@ -595,15 +595,26 @@ function splitPractice(body) {
   return { questions, answers: rest.slice(0, see).join("\n"), after: rest.slice(see).join("\n") };
 }
 
+function peelSeeAlso(body) {
+  const lines = String(body || "").replace(/\r\n/g, "\n").split("\n");
+  const isSeeAlso = (line) => /^(?:\*\*)?See also:/i.test(line.trim());
+  const see = lines.findIndex(isSeeAlso);
+  if (see < 0) return { body: body || "", seeAlso: "" };
+  return {
+    body: lines.slice(0, see).join("\n").replace(/\s+$/, "\n"),
+    seeAlso: lines.slice(see).join("\n"),
+  };
+}
+
 function renderPractice(body) {
-  if (!String(body || "").trim()) return "";
+  if (!String(body || "").trim()) return { html: "", seeAlso: "" };
   const { questions, answers, after } = splitPractice(body);
   const qHtml = questions.trim() ? renderNotes(questions) : "";
   const aHtml = answers.trim()
     ? `<details class="practice-answers"><summary>Show answers</summary><div class="practice-answers-body">${renderNotes(answers)}</div></details>`
     : "";
-  const afterHtml = after.trim() ? renderNotes(after) : "";
-  return `<section class="study-callout study-callout-practice"><div class="study-callout-label">Practice</div>${qHtml}${aHtml}${afterHtml}</section>`;
+  const html = `<section class="study-callout study-callout-practice"><div class="study-callout-label">Practice</div>${qHtml}${aHtml}</section>`;
+  return { html, seeAlso: after };
 }
 
 /** Teaching lead only (before Exam tips). Used under More depth, or open when there are no owner notes. */
@@ -626,11 +637,15 @@ export function renderDepth(node) {
 /** Exam tips, Memory aids and Practice, always visible in the panel flow. */
 export function renderStudyLayers(node) {
   const parts = splitExpanded(node?.expanded || "");
-  const exam = parts.exam.trim() ? wrapStudyCallout("exam", renderNotes(parts.exam)) : "";
-  const memory = parts.memory.trim() ? wrapStudyCallout("memory", renderNotes(parts.memory)) : "";
-  const practice = renderPractice(parts.practice);
-  if (!exam && !memory && !practice) return "";
-  return `<div class="study-stack">${exam}${memory}${practice}</div>`;
+  const examPeeled = peelSeeAlso(parts.exam);
+  const memPeeled = peelSeeAlso(parts.memory);
+  const exam = examPeeled.body.trim() ? wrapStudyCallout("exam", renderNotes(examPeeled.body)) : "";
+  const memory = memPeeled.body.trim() ? wrapStudyCallout("memory", renderNotes(memPeeled.body)) : "";
+  const prac = renderPractice(parts.practice);
+  const seeSrc = [prac.seeAlso, memPeeled.seeAlso, examPeeled.seeAlso].find((s) => String(s || "").trim()) || "";
+  const seeHtml = seeSrc.trim() ? renderNotes(seeSrc) : "";
+  if (!exam && !memory && !prac.html && !seeHtml) return "";
+  return `<div class="study-stack">${exam}${memory}${prac.html}</div>${seeHtml}`;
 }
 
 export const FULL_NOTES_LABEL = "Full notes (from your original document)";
