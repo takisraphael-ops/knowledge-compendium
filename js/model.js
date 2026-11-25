@@ -39,6 +39,24 @@ export function normalizeKeyTerms(raw) {
   return out.length ? out : undefined;
 }
 
+/** Normalise an optional per-topic Key points list: string[]. */
+export function normalizeKeyPoints(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const out = [];
+  for (const item of raw) {
+    const s = String(item ?? "").trim();
+    if (s) out.push(s);
+  }
+  return out.length ? out : undefined;
+}
+
+function keyPointsEqual(a, b) {
+  const aa = Array.isArray(a) ? a : [];
+  const bb = Array.isArray(b) ? b : [];
+  if (aa.length !== bb.length) return false;
+  return aa.every((item, i) => item === bb[i]);
+}
+
 function keyTermsEqual(a, b) {
   const aa = Array.isArray(a) ? a : [];
   const bb = Array.isArray(b) ? b : [];
@@ -74,6 +92,9 @@ export function normalizeNode(raw) {
   if (sids.length) node.sectionIds = sids;
   const keyTerms = normalizeKeyTerms(n.keyTerms);
   if (keyTerms) node.keyTerms = keyTerms;
+  const keyPoints = normalizeKeyPoints(n.keyPoints);
+  if (keyPoints) node.keyPoints = keyPoints;
+  if (n.keyPointsFromOwner) node.keyPointsFromOwner = true;
   return node;
 }
 
@@ -98,6 +119,12 @@ export function normalizeEdits(raw) {
           const terms = normalizeKeyTerms(v);
           if (terms) clean[k] = terms;
         }
+        else if (k === "keyPoints") {
+          const pts = normalizeKeyPoints(v);
+          if (pts) clean[k] = pts;
+          else clean[k] = [];
+        }
+        else if (k === "keyPointsFromOwner") clean[k] = Boolean(v);
         else if (CORE.includes(k) || k === "link" || k === "linkLabel") clean[k] = v == null ? "" : String(v);
       }
       if (Object.keys(clean).length) changed[String(id)] = clean;
@@ -261,7 +288,8 @@ export function searchBlob(node) {
   const keyTerms = Array.isArray(node.keyTerms)
     ? node.keyTerms.flatMap((item) => [item.term || "", item.def || "", item.link || ""])
     : [];
-  return [node.title, node.summary, node.text, node.tidy || "", node.expanded || "", ...(node.docs || []), ...(node.tags || []), ...keyTerms]
+  const keyPoints = Array.isArray(node.keyPoints) ? node.keyPoints : [];
+  return [node.title, node.summary, node.text, node.tidy || "", node.expanded || "", ...(node.docs || []), ...(node.tags || []), ...keyTerms, ...keyPoints]
     .join("\n")
     .toLowerCase();
 }
@@ -295,6 +323,13 @@ export function diffNode(base, next) {
   if (!keyTermsEqual(base?.keyTerms, next?.keyTerms)) {
     const terms = normalizeKeyTerms(next?.keyTerms);
     patch.keyTerms = terms || [];
+  }
+  if (!keyPointsEqual(base?.keyPoints, next?.keyPoints)) {
+    const pts = normalizeKeyPoints(next?.keyPoints);
+    patch.keyPoints = pts || [];
+  }
+  if (Boolean(base?.keyPointsFromOwner) !== Boolean(next?.keyPointsFromOwner)) {
+    patch.keyPointsFromOwner = Boolean(next?.keyPointsFromOwner);
   }
   return patch;
 }

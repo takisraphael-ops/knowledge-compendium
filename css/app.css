@@ -560,6 +560,33 @@ h1 .added-badge { font-weight: 700; }
 .study-callout-practice .notes ul li,
 .practice-answers-body .notes li { margin: 0.7em 0; }
 
+/* Key points: always-visible revision box, before More depth / Exam tips. */
+.study-callout-keypoints {
+  background: #faf6f1;
+  border-color: #e4d5c4;
+  border-left: 3px solid #8a4f2e;
+  margin: 16px 0 20px;
+  padding: 16px 18px 14px;
+}
+.study-callout-keypoints > .study-callout-label { color: #8a4f2e; }
+.key-points-list {
+  margin: 0;
+  padding: 0 0 0 1.15em;
+}
+.key-points-list li {
+  margin: 0 0 0.65em;
+  line-height: 1.55;
+  font-size: 1.05rem;
+}
+.key-points-list li:last-child { margin-bottom: 0; }
+.key-points-note {
+  margin: 0.8em 0 0;
+  font-family: var(--sans);
+  font-size: 0.82rem;
+  color: #6a5648;
+  line-height: 1.45;
+}
+
 /* Per-topic Key terms: always visible at the bottom of the explanation. */
 .key-terms {
   margin: 12px 0 22px;
@@ -632,6 +659,8 @@ h1 .added-badge { font-weight: 700; }
   .notes { font-size: 1.05rem; line-height: 1.75; }
   .study-stack { gap: 1.4rem; }
   .study-callout { padding: 14px 14px 12px; }
+  .study-callout-keypoints { margin: 14px 0 18px; padding: 14px 14px 12px; }
+  .key-points-list li { font-size: 1.02rem; margin: 0 0 0.7em; }
   .practice-answers > summary { min-height: 44px; }
   .key-terms { margin: 4px 0 14px; padding: 2px 12px 12px; }
   .key-terms > summary.key-terms-label { padding: 10px 0 8px; min-height: 44px; display: flex; align-items: center; }
@@ -847,6 +876,7 @@ h1 .added-badge { font-weight: 700; }
   #panel .summary,
   #panel .notes,
   #panel .study-callout,
+  #panel .study-callout-keypoints,
   #panel .study-stack,
   #panel .your-notes,
   #panel .expanded-block,

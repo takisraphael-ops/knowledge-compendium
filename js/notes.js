@@ -570,8 +570,43 @@ export function hasOriginalToggle(node) {
   return !!(tidy && text && tidy !== text);
 }
 
+const KP_OWNER_HEADING = /^(?:#{1,3}\s*)?key\s*points?\s*:?\s*$/i;
+const MD_HEADING = /^#{1,3}\s+\S/;
+
+/** Remove an owner "Key Points" table or list from displayed notes so the box is not duplicated. */
+export function stripOwnerKeyPointsSection(md) {
+  const lines = String(md || "").replace(/\r\n/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  let removed = false;
+  while (i < lines.length) {
+    if (KP_OWNER_HEADING.test(lines[i].trim())) {
+      removed = true;
+      i += 1;
+      let saw = false;
+      while (i < lines.length) {
+        const t = lines[i].trim();
+        if (MD_HEADING.test(t) && !KP_OWNER_HEADING.test(t)) break;
+        if (saw && t && !t.startsWith("|") && !/^[-*•–]\s+/.test(t) && !t.startsWith(">")) break;
+        if (t) saw = true;
+        i += 1;
+      }
+      continue;
+    }
+    out.push(lines[i]);
+    i += 1;
+  }
+  return { text: out.join("\n").replace(/\n{3,}/g, "\n\n").trim(), removed };
+}
+
 export function renderYourNotes(node, showOriginal = false) {
-  const body = displayNotes(node, showOriginal);
+  let body = displayNotes(node, showOriginal);
+  // When the Key points box was derived from the owner's table, do not show that table twice.
+  // Original wording (showOriginal) still includes it in full.
+  if (!showOriginal && node?.keyPointsFromOwner && body) {
+    const stripped = stripOwnerKeyPointsSection(body);
+    if (stripped.removed) body = stripped.text;
+  }
   // Owner notes keep ordinary headings; official Exam tips / Memory aids live in the study stack.
   return body ? renderNotes(body, { studyCallouts: false }) : "";
 }
@@ -821,3 +856,17 @@ export function renderKeyTerms(node) {
   </details>`;
 }
 
+/** Always-visible Key points box: 3–5 revision bullets, never behind More depth. */
+export function renderKeyPoints(node) {
+  const items = Array.isArray(node?.keyPoints) ? node.keyPoints.map((s) => String(s || "").trim()).filter(Boolean) : [];
+  if (!items.length) return "";
+  const lis = items.map((s) => `<li>${inline(s)}</li>`).join("");
+  const note = node?.keyPointsFromOwner
+    ? `<p class="key-points-note">Drawn from the Key Points table in your notes on this page.</p>`
+    : "";
+  return `<section id="panel-key-points" class="study-callout study-callout-keypoints">
+    <div class="study-callout-label">Key points</div>
+    <ul class="key-points-list">${lis}</ul>
+    ${note}
+  </section>`;
+}

@@ -35,7 +35,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "./model.js";
-import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
+import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession } from "./revise.js";
 import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips } from "./abbr.js";
 
@@ -1276,6 +1276,7 @@ function renderPanel() {
       <label class="field">Your notes <span class="hint-text">tidied version, shown first on the topic</span><textarea id="f-tidy" rows="12">${escapeHtml(node.tidy || node.text || "")}</textarea></label>
       <label class="field">Original wording <span class="hint-text">kept verbatim; one tap away on the topic page</span><textarea id="f-text" rows="8">${escapeHtml(node.text)}</textarea></label>
       <label class="field">Expanded explanation <span class="hint-text">added by Grokimus; yours to edit</span><textarea id="f-expanded" rows="10">${escapeHtml(node.expanded || "")}</textarea></label>
+      <label class="field">Key points <span class="hint-text">3–5 short revision bullets, one per line. Leave blank on headings and glossaries.</span><textarea id="f-keypoints" rows="5">${escapeHtml((node.keyPoints || []).join("\n"))}</textarea></label>
       <p class="hint-text">Lines that start with @@ name a source. ### is a heading, “- ” is a bullet, and “| a | b |” is a table.</p>
       <label class="field">Sources <span class="hint-text">codes, comma separated</span><input id="f-docs" value="${escapeHtml((node.docs || []).join(", "))}"></label>
       <label class="field">Tags<input id="f-tags" value="${escapeHtml((node.tags || []).join(", "))}"></label>
@@ -1323,8 +1324,10 @@ function renderPanel() {
     : "";
 
   const keyTermsHtml = renderKeyTerms(node);
+  const keyPointsHtml = renderKeyPoints(node);
   const jumpItems = [];
   if (node.summary || ownNotes || hasLead) jumpItems.push({ id: "panel-explanation", label: "Explanation" });
+  if (keyPointsHtml) jumpItems.push({ id: "panel-key-points", label: "Key points" });
   if (studyLayers.includes("id=\"panel-exam-tips\"")) jumpItems.push({ id: "panel-exam-tips", label: "Exam tips" });
   if (studyLayers.includes("id=\"panel-memory-aids\"")) jumpItems.push({ id: "panel-memory-aids", label: "Memory aids" });
   if (studyLayers.includes("id=\"panel-practice\"")) jumpItems.push({ id: "panel-practice", label: "Practice" });
@@ -1350,7 +1353,9 @@ function renderPanel() {
     ${link}
     ${docs || tags ? `<div class="chips">${docs}${tags}</div>` : ""}
     ${yourNotes}
-    ${more}
+    ${expandInOpen ? more : ""}
+    ${keyPointsHtml}
+    ${!expandInOpen ? more : ""}
     </div>
     ${studyLayers}
     ${keyTermsHtml}
@@ -1390,6 +1395,11 @@ function saveForm() {
     docs: readList($("f-docs").value),
     tags: readList($("f-tags").value),
   };
+  if ($("f-keypoints")) {
+    const pts = $("f-keypoints").value.split("\n").map((s) => s.replace(/^[-*•–]\s+/, "").trim()).filter(Boolean);
+    next.keyPoints = pts;
+    if (node.keyPointsFromOwner && pts.length) next.keyPointsFromOwner = true;
+  }
   commitNode(next);
   state.editing = false;
   toast("Saved on this device");
