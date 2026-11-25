@@ -31,6 +31,15 @@ const UNIT_OR_PRODUCT = new Set([
   "XI", "XII", "XIII", "XIV", "XV", "XVI", "XIX", "XX", "XXI",
 ]);
 
+/**
+ * Conventional short expansions used when harvest yields a sentence rather
+ * than the official name. Applied only to the in-memory map — never shipped
+ * as a plaintext glossary file.
+ */
+const OFFICIAL_EXPAND = {
+  RSA: "Rivest–Shamir–Adleman",
+};
+
 /** Token as it appears in a term title (paren or bare). */
 const ACR_TOKEN = String.raw`(?:Wi-Fi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|WiFi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|OAuth(?:\s*2\.0)?|DDoS|ATT&CK|SD-WAN|WS-Federation|LLDP-MED|VT-x|IPv[46]|802\.\d{1,2}[A-Za-z]{0,3}|CSMA\/C[AD]|TACACS\+|SHA-?\d{1,3}|MD5|3DES|NVMe|QoS|PoE|IPsec|IPSec|PCIe|PCI-E|[A-Z][A-Z0-9]{1,8}\+?|[A-Z]{2,8}\/[A-Z]{2,6}|[A-Z]{2,8}-[A-Z0-9]{1,8})`;
 
@@ -241,8 +250,11 @@ function pickBest(acr, phrases) {
     if (contained) continue;
     kept.push(p);
   }
+  // Prefer a conventional initialism expansion (Rivest–Shamir–Adleman for RSA)
+  // over a harvested sentence that happens to start with a capital letter.
+  const initial = kept.filter((e) => looksLikeExpansion(acr, e));
   const formal = kept.filter((e) => /^[A-Z]/.test(e) && /[A-Za-z]{2,}\s+[A-Za-z]{2,}/.test(e) && !/\b(?:is|are|then)\b/.test(e));
-  const pool = formal.length ? formal : kept;
+  const pool = initial.length ? initial : formal.length ? formal : kept;
   const long = pool.filter((e) => e.split(/\s+/).length >= 3);
   return long.length ? long : pool;
 }
@@ -267,8 +279,8 @@ function wordInitials(phrase) {
     const cleaned = p.replace(/[(),.:]/g, "");
     if (!cleaned) continue;
     if (/^[A-Z]{2,8}(?:[+\-][A-Z0-9]+)?$/.test(cleaned)) inits.push(cleaned);
-    else if (cleaned.includes("-") && /[A-Za-z]/.test(cleaned)) {
-      for (const h of cleaned.split("-").filter(Boolean)) {
+    else if (/[-–—]/.test(cleaned) && /[A-Za-z]/.test(cleaned)) {
+      for (const h of cleaned.split(/[-–—]/).filter(Boolean)) {
         if (/^\d+$/.test(h)) inits.push(h);
         else inits.push(h[0].toUpperCase());
       }
@@ -415,7 +427,27 @@ function glossTerms(expanded) {
   return out;
 }
 
+function applyOfficialExpands() {
+  for (const [raw, expand] of Object.entries(OFFICIAL_EXPAND)) {
+    const key = canonicalAbbrKey(raw);
+    if (!allowedKey(key) || !expand) continue;
+    const list = index.byAcr.get(key) || [];
+    const wanted = normExpand(expand);
+    const branches = new Set(list.map((r) => r.branch || ""));
+    if (!branches.size) branches.add("");
+    // resolveAbbr prefers a branch-local sense, so the official name must
+    // be present on each branch that already has a row, not only globally.
+    for (const branch of branches) {
+      const already = list.find((r) => normExpand(r.expand) === wanted && (r.branch || "") === branch);
+      if (already) already.prefer = true;
+      else list.unshift({ expand: wanted, branch, src: "official", prefer: true });
+    }
+    index.byAcr.set(key, list);
+  }
+}
+
 function compile() {
+  applyOfficialExpands();
   const forms = [];
   index.surfaceToKey = new Map();
   for (const key of index.byAcr.keys()) {
@@ -430,7 +462,9 @@ function compile() {
   }
   forms.sort((a, b) => b.length - a.length || a.localeCompare(b));
   const alt = forms.map(escapeRe).join("|");
-  index.re = new RegExp(`(?<![A-Za-z0-9&])(${alt})s?(?![A-Za-z0-9.&\u2080-\u2089])`, "g");
+  // Allow sentence punctuation after a token ("AES.") but do not split dotted
+  // identifiers such as 802.11 or AES.GCM.
+  index.re = new RegExp(`(?<![A-Za-z0-9&])(${alt})s?(?![A-Za-z0-9&\u2080-\u2089])(?!\\.[A-Za-z0-9])`, "g");
 }
 
 /**
