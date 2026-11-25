@@ -404,8 +404,8 @@ body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user
 .crumbs { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; color: var(--muted); font-size: 12px; }
 .crumbs button { background: none; border: 0; padding: 0; color: var(--teal); text-align: left; }
 .sep { opacity: 0.6; }
-#panel h1 { font-family: var(--serif); font-size: 1.65rem; line-height: 1.25; letter-spacing: -0.02em; margin: 8px 0 10px; font-weight: 650; }
-.summary { font-size: 1.05rem; line-height: 1.7; margin: 0 0 1.25em; max-width: min(72ch, 100%); color: #24323a; }
+#panel h1 { font-family: var(--serif); font-size: 1.65rem; line-height: 1.25; letter-spacing: -0.02em; margin: 8px 0 16px; font-weight: 650; }
+.summary { font-size: 1.05rem; line-height: 1.75; margin: 0 0 1.5em; max-width: min(72ch, 100%); color: #24323a; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 12px; }
 .chip {
   border: 0;
@@ -477,17 +477,17 @@ body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; user
 h1 .added-badge { font-weight: 700; }
 .grokimus-open { margin: 12px 0 20px; }
 .depth-btn { margin: 8px 0 16px; }
-.notes { font-family: var(--serif); font-size: 1.125rem; line-height: 1.7; max-width: min(72ch, 100%); }
-.notes p { margin: 0 0 1.15em; }
+.notes { font-family: var(--serif); font-size: 1.125rem; line-height: 1.75; max-width: min(72ch, 100%); }
+.notes p { margin: 0 0 1.4em; }
 .notes p:last-child { margin-bottom: 0.2em; }
-.notes h3, .notes h4 { font-family: var(--sans); letter-spacing: -0.01em; margin: 1.7em 0 0.6em; font-weight: 700; }
+.notes h3, .notes h4 { font-family: var(--sans); letter-spacing: -0.01em; margin: 2em 0 0.85em; font-weight: 700; }
 .notes h3:first-child, .notes h4:first-child { margin-top: 0.35em; }
 .notes h3 { font-size: 1.05rem; color: var(--ink); }
 .study-stack {
   display: flex;
   flex-direction: column;
-  gap: 1.15rem;
-  margin: 12px 0 22px;
+  gap: 1.6rem;
+  margin: 16px 0 28px;
   max-width: min(72ch, 100%);
 }
 .study-callout {
@@ -603,7 +603,7 @@ h1 .added-badge { font-weight: 700; }
 .key-term {
   display: grid;
   gap: 4px;
-  padding: 10px 0;
+  padding: 14px 0;
   border-top: 1px solid #e4e8f0;
 }
 .key-term:first-child { border-top: 0; }
@@ -628,9 +628,9 @@ h1 .added-badge { font-weight: 700; }
 .key-term-link:hover { color: var(--teal); }
 .key-term-name { color: var(--ink); }
 @media (max-width: 860px) {
-  .summary { font-size: 1.02rem; line-height: 1.7; }
-  .notes { font-size: 1.05rem; line-height: 1.7; }
-  .study-stack { gap: 1.05rem; }
+  .summary { font-size: 1.02rem; line-height: 1.75; }
+  .notes { font-size: 1.05rem; line-height: 1.75; }
+  .study-stack { gap: 1.4rem; }
   .study-callout { padding: 14px 14px 12px; }
   .practice-answers > summary { min-height: 44px; }
   .key-terms { margin: 4px 0 14px; padding: 2px 12px 12px; }
@@ -640,8 +640,8 @@ h1 .added-badge { font-weight: 700; }
 }
 
 .notes h4 { font-size: 0.98rem; color: #24343a; }
-.notes ul, .notes ol { margin: 0 0 1.2em; padding-left: 1.35em; }
-.notes li { margin: 0.5em 0; padding-left: 0.15em; }
+.notes ul, .notes ol { margin: 0 0 1.4em; padding-left: 1.35em; }
+.notes li { margin: 0.75em 0; padding-left: 0.15em; }
 .notes li::marker { color: #5c6560; }
 .notes strong { font-weight: 700; }
 .notes code { font-family: var(--mono); font-size: 0.86em; background: #f3efe6; border: 1px solid #e7e0d4; padding: 0.05em 0.32em; border-radius: 4px; }
@@ -1310,3 +1310,39 @@ body.revise-open.panel-open .map-controls { visibility: hidden; pointer-events: 
   .rev-card-block { padding: 16px; }
   #revise-btn { min-height: 44px; }
 }
+
+
+/* Accessible acronym tooltips (hover, focus, tap). */
+abbr.kc-abbr {
+  text-decoration: underline dotted;
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: from-font;
+  text-decoration-color: #5c6560;
+  cursor: help;
+  font-style: inherit;
+  letter-spacing: inherit;
+  border-bottom: none;
+}
+abbr.kc-abbr:focus {
+  outline: none;
+}
+abbr.kc-abbr:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+#kc-abbr-tip {
+  position: fixed;
+  z-index: 80;
+  max-width: min(20rem, calc(100vw - 24px));
+  padding: 8px 12px;
+  background: #1b2420;
+  color: #f7f4ee;
+  font-family: var(--sans);
+  font-size: 0.88rem;
+  line-height: 1.45;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+}
+#kc-abbr-tip[hidden] { display: none; }

@@ -37,6 +37,7 @@ import {
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession } from "./revise.js";
+import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips } from "./abbr.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -333,6 +334,7 @@ function rebuildDerived() {
   state.filter = idsPassingDocFilter(state.index, state.doc);
   fillDocFilter();
   setTermLinker(state.index ? buildTermLinker(state.index) : null);
+  setAbbrIndex(buildAbbrIndex(state.index, { subjects: state.subjects, nodeBranch: state.nodeBranch }));
 }
 
 function branchColor(id) {
@@ -1021,15 +1023,34 @@ function expandSubtree(id) {
   draw();
 }
 
+function isAcronymAwareQuery(raw) {
+  const t = String(raw || "").trim();
+  if (t.length < 2) return false;
+  // ALL-CAPS tokens such as IDS, SIEM, TCP/IP.
+  if (/^[A-Z0-9][A-Z0-9/+\-]{1,11}$/.test(t) && /[A-Z]/.test(t)) return true;
+  // Short letter queries ("ids", "mac") should not match inside acids/machine.
+  if (t.length <= 4 && /^[A-Za-z][A-Za-z0-9]*$/.test(t)) return true;
+  return false;
+}
+
+function blobHasQuery(blob, q, acronymAware) {
+  if (!q) return false;
+  if (!acronymAware) return blob.includes(q);
+  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp("(^|[^a-z0-9])" + escaped + "([^a-z0-9]|$)", "i").test(blob);
+}
+
 function runSearch(options = {}) {
-  const q = state.query.trim().toLowerCase();
+  const raw = state.query.trim();
+  const q = raw.toLowerCase();
+  const acronymAware = isAcronymAwareQuery(raw);
   state.hits = [];
   state.hitAncestors = new Set();
   if (q.length >= 2) {
     for (const id of state.index.order) {
       if (state.filter && !state.filter.has(id) && id !== state.index.rootId) continue;
       const blob = state.blobs.get(id) || "";
-      if (blob.includes(q)) state.hits.push(id);
+      if (blobHasQuery(blob, q, acronymAware)) state.hits.push(id);
     }
     const rank = (id) => {
       const node = state.index.byId.get(id);
@@ -1118,11 +1139,20 @@ function sectionsOf(node) {
   return ids.map((id) => state.sections[id]).filter(Boolean);
 }
 
+
+function applyAbbrs() {
+  const node = state.index?.byId.get(state.selected);
+  const subject = node ? subjectOfNode(state.index, state.subjects, node.id) : subjectBySlug(state.slug);
+  const branch = subject?.branchId || subject?.slug || state.nodeBranch?.get(state.selected) || "";
+  wrapPanelAbbrs(els.panel?.querySelector(".panel-body"), branch);
+}
+
 function fillFullNotes(node) {
   const body = $("full-notes-body");
   if (!body || body.dataset.ready === "1") return;
   body.innerHTML = renderFullNotes(sectionsOf(node), node, docLabel);
   body.dataset.ready = "1";
+  applyAbbrs();
 }
 
 
@@ -1335,6 +1365,7 @@ function renderPanel() {
     if (box) box.innerHTML = renderDepth(node);
   }
   if (state.fullNotesOpen && fullSecs.length) fillFullNotes(node);
+  applyAbbrs();
   requestAnimationFrame(() => {
     syncPanelStickyHeight();
     syncPhoneReaderChrome();
@@ -1663,6 +1694,7 @@ function onPanelClick(e) {
     const node = state.index.byId.get(state.selected);
     const box = $("your-notes-body");
     if (box && node) box.innerHTML = renderYourNotes(node, state.showOriginal);
+    applyAbbrs();
     btn.setAttribute("aria-pressed", state.showOriginal ? "true" : "false");
     btn.textContent = state.showOriginal ? SHOW_TIDIED : SHOW_ORIGINAL;
   } else if (act === "depth") {
@@ -1672,6 +1704,7 @@ function onPanelClick(e) {
     if (state.depthOpen && box && node && !box.dataset.ready) {
       box.innerHTML = renderDepth(node);
       box.dataset.ready = "1";
+      applyAbbrs();
     }
     if (box) box.hidden = !state.depthOpen;
     btn.setAttribute("aria-expanded", state.depthOpen ? "true" : "false");
@@ -1922,6 +1955,7 @@ function wirePanelResize() {
 }
 
 function wireChrome() {
+  bindAbbrTooltips();
   initRevise({
     els: { revise: els.revise, reviseBtn: els.reviseBtn },
     getState: () => state,

@@ -797,8 +797,11 @@ export function renderKeyTerms(node) {
       : `<span class="key-term-name">${term}</span>`;
     return `<div class="key-term"><dt>${name}</dt><dd>${def}</dd></div>`;
   }).join("");
-  return `<details id="panel-key-terms" class="key-terms" open>
-    <summary class="key-terms-label">${KEY_TERMS_LABEL}</summary>
+  const isMobile = typeof window !== "undefined" && window.matchMedia("(max-width: 700px)").matches;
+  const startOpen = items.length <= 4 && !isMobile;
+  const label = `${KEY_TERMS_LABEL} (${items.length})`;
+  return `<details id="panel-key-terms" class="key-terms"${startOpen ? " open" : ""}>
+    <summary class="key-terms-label">${label}</summary>
     <dl class="key-terms-list">${rows}</dl>
   </details>`;
 }
