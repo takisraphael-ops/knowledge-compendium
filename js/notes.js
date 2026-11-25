@@ -468,6 +468,21 @@ function renderBlocks(lines, opts = {}) {
       i++;
       continue;
     }
+    if (opts.studyCallouts !== false && /^\*\*Original wording\b/i.test(trimmed)) {
+      const inner = [];
+      let j = i + 1;
+      while (j < lines.length) {
+        const t = lines[j].trim();
+        const h = t.match(/^(#{1,6})\s+(.*)$/);
+        if (h && (studyCalloutKind(h[2]) || /^practice$/i.test(String(h[2]).replace(/[:.]+$/, "").trim()))) break;
+        inner.push(lines[j]);
+        j++;
+      }
+      const summary = inline(trimmed.replace(/^\*\*|\*\*$/g, "").replace(/\*\*/g, ""));
+      html.push(`<details class="original-wording"><summary>${summary}</summary>${renderBlocks(inner, opts)}</details>`);
+      i = j;
+      continue;
+    }
     const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const kind = opts.studyCallouts === false ? "" : studyCalloutKind(heading[2]);

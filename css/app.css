@@ -680,9 +680,10 @@ h1 .added-badge { font-weight: 700; }
   color: var(--teal);
   margin-bottom: 8px;
 }
-.table-wrap { display: block; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 0 0.9em; border: 1px solid #e3dcd0; border-radius: 8px; }
+.table-wrap { display: block; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; margin: 0 0 0.9em; border: 1px solid #e3dcd0; border-radius: 8px; }
 .notes table { border-collapse: collapse; width: 100%; font-family: var(--sans); font-size: 0.92rem; line-height: 1.45; }
-.notes th, .notes td { border: 0; border-bottom: 1px solid #e3dcd0; padding: 8px 10px; vertical-align: top; text-align: left; }
+.table-wrap > table { width: max-content; min-width: 100%; max-width: none; }
+.notes th, .notes td { border: 0; border-bottom: 1px solid #e3dcd0; padding: 8px 10px; vertical-align: top; text-align: left; overflow-wrap: anywhere; word-break: break-word; }
 .notes tr:last-child td { border-bottom: 0; }
 .notes th { background: #f3efe6; font-weight: 700; color: #2a2620; }
 .notes tbody tr:nth-child(even) td { background: #faf8f4; }
@@ -971,10 +972,22 @@ mark.own-passage, .own-passage-block {
   border-radius: 8px;
   margin: 0 0 1.15em;
 }
-.notes img, .notes table, .notes .table-wrap, .your-notes .table-wrap, .expanded-block .table-wrap {
+.notes img {
   max-width: 100%;
 }
-.table-wrap { display: block; width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }
+.notes .table-wrap, .your-notes .table-wrap, .expanded-block .table-wrap, .full-notes .table-wrap {
+  max-width: 100%;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.notes .table-wrap > table, .your-notes .table-wrap > table, .expanded-block .table-wrap > table, .full-notes .table-wrap > table {
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+}
 
 
 .notes-rule {
@@ -988,6 +1001,18 @@ mark.own-passage, .own-passage-block {
   overflow-x: hidden;
   overflow-wrap: break-word;
   word-wrap: break-word;
+}
+details.original-wording {
+  margin: 0 0 1.2em;
+  border: 1px solid #e3dcd0;
+  border-radius: 8px;
+  padding: 0.35em 0.85em 0.65em;
+  background: #faf8f4;
+}
+details.original-wording > summary {
+  cursor: pointer;
+  font-weight: 650;
+  padding: 0.35em 0;
 }
 .term-run dt, .term-run dd, .key-term dt, .key-term dd, .notes a, .notes code {
   overflow-wrap: anywhere;
