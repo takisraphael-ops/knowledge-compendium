@@ -527,12 +527,15 @@ export function resolveAbbr(acr, branch) {
 const SKIP_TAGS = new Set([
   "CODE", "PRE", "A", "KBD", "SAMP", "ABBR", "H1", "H2", "H3", "H4", "H5", "H6",
   "BUTTON", "TEXTAREA", "INPUT", "SCRIPT", "STYLE", "SUMMARY", "DT",
+  "SVG", "TITLE", "DESC", "TEXT", "TSPAN", "PATH", "G", "RECT", "LINE",
+  "POLYGON", "POLYLINE", "CIRCLE", "ELLIPSE", "MARKER", "DEFS", "USE",
 ]);
 
 function skipNode(node, root) {
   let el = node.nodeType === 3 ? node.parentElement : node;
   while (el && el !== root) {
     if (SKIP_TAGS.has(el.tagName)) return true;
+    if (el.closest && el.closest("svg")) return true;
     if (el.isContentEditable) return true;
     const cl = el.classList;
     if (cl && (cl.contains("term-run") || cl.contains("key-terms") || cl.contains("jump-bar") || cl.contains("crumbs"))) return true;

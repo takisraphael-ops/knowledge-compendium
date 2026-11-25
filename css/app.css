@@ -1600,3 +1600,76 @@ body.glossary-open.panel-open .map-controls { visibility: hidden; pointer-events
   .gloss-jump-link { min-width: 36px; min-height: 40px; }
   #glossary-btn { min-height: 44px; }
 }
+
+/* Reusable topic diagram (inline SVG in a note). */
+figure.kc-diagram {
+  margin: 1.25em 0 1.55em;
+  padding: 8px 8px 10px;
+  max-width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+figure.kc-diagram .kc-diagram-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+figure.kc-diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 280px;
+  font-family: var(--sans);
+}
+figure.kc-diagram figcaption {
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--ink);
+  margin: 0.75em 4px 0;
+  text-align: start;
+}
+.kc-diagram-fallback {
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+}
+.kc-d-rail {
+  fill: var(--teal);
+  font-size: 13px;
+  font-weight: 700;
+}
+.kc-d-model {
+  fill: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+.kc-d-pdu {
+  fill: var(--ink);
+  font-size: 14px;
+  font-weight: 700;
+}
+.kc-d-sub {
+  fill: var(--ink);
+  font-size: 13px;
+}
+.kc-d-note {
+  fill: var(--ink);
+  font-size: 13px;
+}
+.kc-d-arrow {
+  stroke: var(--teal);
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+.kc-d-arrowhead { fill: var(--teal); stroke: none; }
+.kc-d-box { stroke: #4d7370; stroke-width: 1.25; }
+.kc-d-data { fill: #e7f1ef; }
+.kc-d-tcp { fill: #e8eef6; }
+.kc-d-ip { fill: #f4eee6; }
+.kc-d-eth { fill: #efe8dc; }
+.kc-d-bits { fill: #f3f1ec; }
+.kc-d-div { stroke: #4d7370; stroke-width: 1; }

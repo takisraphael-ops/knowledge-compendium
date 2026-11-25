@@ -454,6 +454,106 @@ function collectUntilHeading(lines, start, level) {
   return { inner, next: i };
 }
 
+
+const DIAGRAM_TAGS = new Set([
+  "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+  "text", "tspan", "title", "desc", "defs", "marker", "use", "clippath",
+  "lineargradient", "radialgradient", "stop", "symbol",
+]);
+
+const DIAGRAM_ATTR = new Set([
+  "viewbox", "width", "height", "x", "y", "cx", "cy", "r", "rx", "ry", "dx", "dy",
+  "x1", "y1", "x2", "y2", "d", "points", "fill", "stroke", "stroke-width",
+  "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-miterlimit",
+  "opacity", "fill-opacity", "stroke-opacity", "transform", "font-size",
+  "font-family", "font-weight", "font-style", "letter-spacing", "text-anchor",
+  "dominant-baseline", "alignment-baseline", "xml:space", "class", "id", "role",
+  "aria-label", "aria-labelledby", "aria-describedby", "aria-hidden", "xmlns",
+  "overflow", "preserveaspectratio", "marker-end", "marker-start", "marker-mid",
+  "markerwidth", "markerheight", "refx", "refy", "orient", "clip-path",
+  "gradientunits", "offset", "stop-color", "stop-opacity", "href", "xlink:href",
+]);
+
+function isSafeDiagramUrl(val) {
+  const s = String(val || "").trim();
+  return s.startsWith("#") && !s.startsWith("#javascript");
+}
+
+function sanitizeDiagramNode(src, doc) {
+  if (src.nodeType === 3 || src.nodeType === 4) {
+    return doc.createTextNode(src.nodeValue);
+  }
+  if (src.nodeType !== 1) return null;
+  const tag = src.tagName.toLowerCase();
+  if (!DIAGRAM_TAGS.has(tag)) return null;
+  const outName = tag === "clippath" ? "clipPath" : tag;
+  const out = doc.createElementNS("http://www.w3.org/2000/svg", outName);
+  for (const attr of [...src.attributes]) {
+    const name = attr.name;
+    const lname = name.toLowerCase();
+    if (lname.startsWith("on") || lname === "style") continue;
+    if (!DIAGRAM_ATTR.has(lname)) continue;
+    const val = attr.value;
+    if (lname === "href" || lname === "xlink:href") {
+      if (!isSafeDiagramUrl(val)) continue;
+    }
+    if (/^\s*(?:javascript|data|vbscript):/i.test(val)) continue;
+    out.setAttribute(name, val);
+  }
+  for (const child of src.childNodes) {
+    const next = sanitizeDiagramNode(child, doc);
+    if (next) out.appendChild(next);
+  }
+  return out;
+}
+
+function sanitizeDiagramSvg(raw) {
+  const src = String(raw || "").trim();
+  const match = src.match(/<svg\b[\s\S]*<\/svg>/i);
+  if (!match || typeof DOMParser === "undefined") return "";
+  let parsed;
+  try {
+    parsed = new DOMParser().parseFromString(match[0], "image/svg+xml");
+  } catch {
+    return "";
+  }
+  if (parsed.querySelector("parsererror")) {
+    try {
+      parsed = new DOMParser().parseFromString(match[0], "text/html");
+    } catch {
+      return "";
+    }
+  }
+  const svg = parsed.querySelector("svg");
+  if (!svg) return "";
+  const out = sanitizeDiagramNode(svg, document);
+  if (!out || out.tagName.toLowerCase() !== "svg") return "";
+  if (!out.getAttribute("xmlns")) out.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  if (!out.getAttribute("role")) out.setAttribute("role", "img");
+  return out.outerHTML;
+}
+
+function renderDiagram(raw, caption) {
+  const svg = sanitizeDiagramSvg(raw);
+  const cap = caption ? `<figcaption>${inline(caption)}</figcaption>` : "";
+  if (!svg) return cap ? `<p class="kc-diagram-fallback">${inline(caption)}</p>` : "";
+  return `<figure class="kc-diagram"><div class="kc-diagram-scroll">${svg}</div>${cap}</figure>`;
+}
+
+function consumeDiagram(lines, i) {
+  const trimmed = lines[i].trim();
+  const open = trimmed.match(/^:::diagram(?:\s+|$)(.*)$/);
+  if (!open) return null;
+  const inner = [];
+  let j = i + 1;
+  while (j < lines.length && lines[j].trim() !== ":::") {
+    inner.push(lines[j]);
+    j++;
+  }
+  if (j < lines.length) j++;
+  return { html: renderDiagram(inner.join("\n"), open[1].trim()), next: j };
+}
+
 function renderBlocks(lines, opts = {}) {
   const html = [];
   let i = 0;
@@ -466,6 +566,12 @@ function renderBlocks(lines, opts = {}) {
     if (/^[_—–-]{8,}$/.test(trimmed)) {
       html.push('<hr class="notes-rule" />');
       i++;
+      continue;
+    }
+    const diagram = consumeDiagram(lines, i);
+    if (diagram) {
+      html.push(diagram.html);
+      i = diagram.next;
       continue;
     }
     if (opts.studyCallouts !== false && /^\*\*Original wording\b/i.test(trimmed)) {
@@ -773,6 +879,8 @@ function renderBlocksHighlighted(lines, marks) {
     const trimmed = raw.trim();
     if (!trimmed) { i++; continue; }
     if (/^[_—–-]{8,}$/.test(trimmed)) { html.push('<hr class="notes-rule" />'); i++; continue; }
+    const diagram = consumeDiagram(lines, i);
+    if (diagram) { html.push(diagram.html); i = diagram.next; continue; }
     const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const kind = studyCalloutKind(heading[2]);
