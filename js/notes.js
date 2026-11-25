@@ -458,7 +458,7 @@ function collectUntilHeading(lines, start, level) {
 const DIAGRAM_TAGS = new Set([
   "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
   "text", "tspan", "title", "desc", "defs", "marker", "use", "clippath",
-  "lineargradient", "radialgradient", "stop", "symbol",
+  "lineargradient", "radialgradient", "stop", "symbol", "a",
 ]);
 
 const DIAGRAM_ATTR = new Set([
@@ -472,6 +472,7 @@ const DIAGRAM_ATTR = new Set([
   "overflow", "preserveaspectratio", "marker-end", "marker-start", "marker-mid",
   "markerwidth", "markerheight", "refx", "refy", "orient", "clip-path",
   "gradientunits", "offset", "stop-color", "stop-opacity", "href", "xlink:href",
+  "tabindex", "data-acr", "data-branch", "data-expand",
 ]);
 
 function isSafeDiagramUrl(val) {
@@ -507,19 +508,18 @@ function sanitizeDiagramNode(src, doc) {
   return out;
 }
 
-function sanitizeDiagramSvg(raw) {
-  const src = String(raw || "").trim();
-  const match = src.match(/<svg\b[\s\S]*<\/svg>/i);
-  if (!match || typeof DOMParser === "undefined") return "";
+function sanitizeOneSvg(chunk) {
+  const src = String(chunk || "").trim();
+  if (!src || typeof DOMParser === "undefined") return "";
   let parsed;
   try {
-    parsed = new DOMParser().parseFromString(match[0], "image/svg+xml");
+    parsed = new DOMParser().parseFromString(src, "image/svg+xml");
   } catch {
     return "";
   }
   if (parsed.querySelector("parsererror")) {
     try {
-      parsed = new DOMParser().parseFromString(match[0], "text/html");
+      parsed = new DOMParser().parseFromString(src, "text/html");
     } catch {
       return "";
     }
@@ -533,11 +533,35 @@ function sanitizeDiagramSvg(raw) {
   return out.outerHTML;
 }
 
+function sanitizeDiagramSvg(raw) {
+  const match = String(raw || "").match(/<svg\b[\s\S]*?<\/svg>/i);
+  return match ? sanitizeOneSvg(match[0]) : "";
+}
+
+function extractSvgChunks(raw) {
+  const chunks = [];
+  const re = /<svg\b[\s\S]*?<\/svg>/gi;
+  let m;
+  while ((m = re.exec(String(raw || "")))) chunks.push(m[0]);
+  return chunks;
+}
+
+function wrapDiagramSvg(svgHtml) {
+  const cls = (svgHtml.match(/class="([^"]*)"/) || [])[1] || "";
+  const variant = /\bkc-diagram-narrow\b/.test(cls)
+    ? "kc-diagram-narrow"
+    : /\bkc-diagram-wide\b/.test(cls)
+      ? "kc-diagram-wide"
+      : "";
+  const wrap = variant ? `kc-diagram-scroll ${variant}` : "kc-diagram-scroll";
+  return `<div class="${wrap}">${svgHtml}</div>`;
+}
+
 function renderDiagram(raw, caption) {
-  const svg = sanitizeDiagramSvg(raw);
+  const svgs = extractSvgChunks(raw).map(sanitizeOneSvg).filter(Boolean);
   const cap = caption ? `<figcaption>${inline(caption)}</figcaption>` : "";
-  if (!svg) return cap ? `<p class="kc-diagram-fallback">${inline(caption)}</p>` : "";
-  return `<figure class="kc-diagram"><div class="kc-diagram-scroll">${svg}</div>${cap}</figure>`;
+  if (!svgs.length) return cap ? `<p class="kc-diagram-fallback">${inline(caption)}</p>` : "";
+  return `<figure class="kc-diagram">${svgs.map(wrapDiagramSvg).join("")}${cap}</figure>`;
 }
 
 function consumeDiagram(lines, i) {

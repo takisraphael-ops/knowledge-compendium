@@ -1424,6 +1424,30 @@ a.kc-abbr:focus-visible, abbr.kc-abbr:focus-visible {
 .kc-abbr-tip-link:hover { color: #fff; }
 a.kc-abbr { color: inherit; }
 
+/* Diagram SVG acronyms: same tooltip affordance, no layout shift. */
+figure.kc-diagram svg a.kc-abbr {
+  color: inherit;
+  fill: inherit;
+  cursor: pointer;
+  outline: none;
+  text-decoration: none;
+  pointer-events: auto;
+}
+figure.kc-diagram svg a.kc-abbr text,
+figure.kc-diagram svg a.kc-abbr tspan {
+  text-decoration: underline dotted;
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: from-font;
+  text-decoration-color: #5c6560;
+  cursor: pointer;
+}
+figure.kc-diagram svg a.kc-abbr:focus,
+figure.kc-diagram svg a.kc-abbr:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+
+
 
 /* —— Master glossary —— */
 #glossary-btn.active {
@@ -1620,7 +1644,6 @@ figure.kc-diagram svg {
   display: block;
   width: 100%;
   height: auto;
-  min-width: 280px;
   font-family: var(--sans);
 }
 figure.kc-diagram figcaption {
@@ -1636,29 +1659,11 @@ figure.kc-diagram figcaption {
   font-size: 16px;
   line-height: 1.6;
 }
-.kc-d-rail {
-  fill: var(--teal);
-  font-size: 13px;
-  font-weight: 700;
-}
-.kc-d-model {
-  fill: var(--ink);
-  font-size: 13px;
-  font-weight: 650;
-}
-.kc-d-pdu {
-  fill: var(--ink);
-  font-size: 14px;
-  font-weight: 700;
-}
-.kc-d-sub {
-  fill: var(--ink);
-  font-size: 13px;
-}
-.kc-d-note {
-  fill: var(--ink);
-  font-size: 13px;
-}
+.kc-d-rail { fill: var(--teal); font-weight: 700; }
+.kc-d-model { fill: var(--ink); font-weight: 650; }
+.kc-d-pdu { fill: var(--ink); font-weight: 700; }
+.kc-d-sub { fill: var(--ink); font-weight: 650; }
+.kc-d-note { fill: var(--ink); }
 .kc-d-arrow {
   stroke: var(--teal);
   fill: none;
@@ -1667,9 +1672,23 @@ figure.kc-diagram figcaption {
 }
 .kc-d-arrowhead { fill: var(--teal); stroke: none; }
 .kc-d-box { stroke: #4d7370; stroke-width: 1.25; }
-.kc-d-data { fill: #e7f1ef; }
-.kc-d-tcp { fill: #e8eef6; }
-.kc-d-ip { fill: #f4eee6; }
-.kc-d-eth { fill: #efe8dc; }
+.kc-d-data { fill: #dceeea; }
+.kc-d-tcp { fill: #dde6f4; }
+.kc-d-ip { fill: #f6e59a; }
+.kc-d-eth { fill: #cbbcd9; }
 .kc-d-bits { fill: #f3f1ec; }
 .kc-d-div { stroke: #4d7370; stroke-width: 1; }
+
+/* Desktop / mobile variants of a two-sided diagram. */
+@media (min-width: 701px) {
+  figure.kc-diagram .kc-diagram-narrow { display: none; }
+  figure.kc-diagram svg.kc-diagram-wide { min-width: 520px; }
+  #panel .expanded-block:has(figure.kc-diagram),
+  #panel .notes:has(figure.kc-diagram) {
+    max-width: min(46rem, 100%);
+  }
+}
+@media (max-width: 700px) {
+  figure.kc-diagram .kc-diagram-wide { display: none; }
+  figure.kc-diagram svg.kc-diagram-narrow { min-width: 300px; }
+}

@@ -352,6 +352,14 @@ function harvestFromTerm(term, def, branch, src) {
     if (inside && !/^[A-Z][A-Z0-9/ .]{1,40}$/.test(inside)) add(m[1], inside, true);
   }
 
+  // "OSI model (Open Systems Interconnection)".
+  const acrNamePhrase = t.match(new RegExp(
+    `^(${ACR_TOKEN})\\s+[A-Za-z][A-Za-z0-9 +/'’.\\-]{0,60}\\s+\\(([^)]+)\\)$`
+  ));
+  if (acrNamePhrase && (looksLikeExpansion(acrNamePhrase[1], acrNamePhrase[2]) || src === "glossary")) {
+    add(acrNamePhrase[1], acrNamePhrase[2], true);
+  }
+
   // Bare "CISSP", "802.1X", "HPA axis": official name at the start of the definition.
   const bare = t.match(new RegExp(`^(${ACR_TOKEN})(?:\\s+axis|\\s+address|\\s+record)?$`, "i"));
   if (bare) {
@@ -422,7 +430,7 @@ function compile() {
   }
   forms.sort((a, b) => b.length - a.length || a.localeCompare(b));
   const alt = forms.map(escapeRe).join("|");
-  index.re = new RegExp(`(?<![A-Za-z0-9/&])(${alt})s?(?![A-Za-z0-9/.&\u2080-\u2089])`, "g");
+  index.re = new RegExp(`(?<![A-Za-z0-9&])(${alt})s?(?![A-Za-z0-9.&\u2080-\u2089])`, "g");
 }
 
 /**
@@ -459,8 +467,53 @@ export function buildAbbrIndex(nodeIndex, ctx = {}) {
       harvestFromTerm(row.term, row.def, branch, "keyTerms");
     }
   }
+  addEthernetAlias(nodeIndex, branchOf);
   compile();
   return { size: index.byAcr.size };
+}
+
+/**
+ * If a glossary lists Ethernet, accept the diagram short form "Eth".
+ * The expansion is the glossary definition, not the word "Ethernet" itself.
+ */
+function addEthernetAlias(nodeIndex, branchOf) {
+  if (!nodeIndex?.byId) return;
+  for (const [id, node] of nodeIndex.byId) {
+    if (!isGlossNode(node)) continue;
+    const branch = typeof branchOf === "function" ? branchOf(id) : "";
+    for (const [term, def] of glossTerms(node.expanded)) {
+      if (!/^ethernet\b/i.test(String(term).trim())) continue;
+      const key = "ETHERNET";
+      if (!allowedKey(key)) continue;
+      const ex = shortDef(def);
+      if (!isPhrase(ex) || ex.toUpperCase() === key || canonicalAbbrKey(ex) === key) continue;
+      const list = index.byAcr.get(key) || [];
+      list.push({ expand: ex, branch: branch || "", src: "glossary", prefer: true });
+      index.byAcr.set(key, list);
+      const set = index.extraSurfaces.get(key) || new Set();
+      set.add("Eth");
+      index.extraSurfaces.set(key, set);
+    }
+  }
+}
+
+export function hydrateAbbrIndex(payload) {
+  index = { byAcr: new Map(), re: null, surfaceToKey: new Map(), extraSurfaces: new Map() };
+  for (const [key, rows] of Object.entries(payload?.byAcr || {})) {
+    index.byAcr.set(key, rows);
+  }
+  for (const [key, arr] of Object.entries(payload?.extraSurfaces || {})) {
+    index.extraSurfaces.set(key, new Set(arr));
+  }
+  compile();
+  return { size: index.byAcr.size };
+}
+
+export function serializeAbbrIndex() {
+  return {
+    byAcr: Object.fromEntries([...index.byAcr]),
+    extraSurfaces: Object.fromEntries([...index.extraSurfaces].map(([k, v]) => [k, [...v]])),
+  };
 }
 
 export function setAbbrIndex(built) {
@@ -507,7 +560,8 @@ export function glossarySlugFor(key) {
 }
 
 export function resolveAbbr(acr, branch) {
-  const key = canonicalAbbrKey(acr);
+  const surface = String(acr || "").trim();
+  const key = index.surfaceToKey.get(surface) || canonicalAbbrKey(acr);
   if (!allowedKey(key)) return "";
   const rows = index.byAcr.get(key) || [];
   if (!rows.length) return "";
@@ -600,6 +654,144 @@ export function wrapPanelAbbrs(root, branch, opts = {}) {
     const parent = textNode.parentNode;
     for (const p of pieces) parent.insertBefore(p, textNode);
     parent.removeChild(textNode);
+  }
+  wrapped += wrapSvgAbbrs(root, branch, skip);
+  return wrapped;
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function makeSvgAbbr(surface, key, expand, branch) {
+  const a = document.createElementNS(SVG_NS, "a");
+  a.setAttribute("href", glossaryHref(key, branch));
+  a.setAttribute("class", "kc-abbr");
+  a.setAttribute("data-acr", key);
+  a.setAttribute("data-branch", branch || "");
+  a.setAttribute("data-expand", expand);
+  a.setAttribute("tabindex", "0");
+  a.setAttribute("role", "link");
+  a.setAttribute("aria-label", `${surface}, ${expand}. Open in the glossary.`);
+  const tspan = document.createElementNS(SVG_NS, "tspan");
+  tspan.textContent = surface;
+  a.appendChild(tspan);
+  return a;
+}
+
+/**
+ * SVG diagrams only: wrap real acronyms/abbreviations, not ordinary words.
+ * All-caps or mixed-case abbreviation tokens that are in the map, plus Eth.
+ * Title-case or lowercase words such as Segment, Packet, Frame, Data,
+ * Network, or Bits are left alone. Prose wrapping is unchanged.
+ */
+export function isDiagramAbbrSurface(surface, key, expand) {
+  const raw = String(surface || "").trim();
+  if (!raw) return false;
+  if (/^Eth$/.test(raw)) return true;
+
+  // Typographic abbreviations: TCP/IP, 802.1X, SHA-256, TACACS+, Wi-Fi.
+  if (/[0-9]/.test(raw) || /[\/+]/.test(raw) || /[A-Za-z0-9]-[A-Za-z0-9]/.test(raw)) return true;
+
+  // Title Case ordinary words (Segment, Packet, Network). "Eth" already allowed.
+  if (/^[A-Z][a-z]+(?:[\s-][A-Z][a-z]+)*$/.test(raw)) return false;
+  if (/^[a-z][a-z'’-]*$/.test(raw)) return false;
+
+  // Mixed-case abbreviations that are not Title Case: IPv4, IPsec, eSIM, PoE, QoS.
+  if (/[a-z]/.test(raw) && /[A-Z]/.test(raw)) return true;
+
+  const core = /s$/.test(raw) && raw.length > 2 ? raw.slice(0, -1) : raw;
+  const rows = index.byAcr.get(key) || [];
+  const senses = [expand, ...rows.map((r) => r.expand)].filter(Boolean);
+  const asInitialism = senses.some((ex) =>
+    looksLikeExpansion(key, ex) || looksLikeExpansion(core, ex) || looksLikeExpansion(raw, ex)
+  );
+
+  // ALL-CAPS (optional trailing plural s, e.g. MACs, IPs).
+  // Wrap initialisms and official short names (HTTP, even when "Hypertext"
+  // does not yield four initials). Leave ordinary words (SEGMENT, FRAME).
+  if (/^[A-Z][A-Z0-9]{0,8}$/.test(core) || /^[A-Z][A-Z0-9]{0,8}\+$/.test(core)) {
+    if (asInitialism) return true;
+    const official = senses.some((ex) => {
+      const s = String(ex || "").trim();
+      if (/^(the|a|an)\s/i.test(s)) return false;
+      const words = s.split(/\s+/).filter(Boolean);
+      const caps = words.filter((w) => /^[A-Z]/.test(w)).length;
+      return words.length >= 2 && caps >= 2;
+    });
+    if (official) return true;
+    return false;
+  }
+  return false;
+}
+
+function matchAbbrPieces(text, branch, skip) {
+  if (!text || !index.re) return null;
+  index.re.lastIndex = 0;
+  const pieces = [];
+  let last = 0;
+  let changed = false;
+  let m;
+  let count = 0;
+  while ((m = index.re.exec(text))) {
+    const raw = m[1];
+    const key = index.surfaceToKey.get(raw) || canonicalAbbrKey(raw);
+    const expand = resolveAbbr(key, branch);
+    if (!expand) continue;
+    if (!isDiagramAbbrSurface(m[0], key, expand)) continue;
+    const forms = [raw, m[0], key, expand];
+    if (forms.some((f) => f && skip.has(String(f).toLowerCase()))) continue;
+    changed = true;
+    if (m.index > last) pieces.push({ type: "text", value: text.slice(last, m.index) });
+    pieces.push({ type: "abbr", surface: m[0], key, expand });
+    last = m.index + m[0].length;
+    count++;
+  }
+  if (!changed) return null;
+  if (last < text.length) pieces.push({ type: "text", value: text.slice(last) });
+  return { pieces, count };
+}
+
+/**
+ * Wrap abbreviation tokens in SVG <text> / <tspan> after render.
+ * Uses SVG <a> (no handlers in content). Layout is preserved.
+ */
+function wrapSvgAbbrs(root, branch, skip) {
+  if (!root || !index.re || typeof root.querySelectorAll !== "function") return 0;
+  const svgs = root.matches?.("svg") ? [root] : [...root.querySelectorAll("svg")];
+  let wrapped = 0;
+  for (const svg of svgs) {
+    const els = [...svg.querySelectorAll("text, tspan")];
+    for (const el of els) {
+      if (el.closest("a.kc-abbr, title, desc, defs")) continue;
+      const direct = [...el.childNodes];
+      const onlyText = direct.length === 1 && direct[0].nodeType === 3;
+      if (onlyText && el.tagName.toLowerCase() === "text") {
+        const found = matchAbbrPieces(direct[0].nodeValue, branch, skip);
+        if (!found) continue;
+        if (found.pieces.length === 1 && found.pieces[0].type === "abbr") {
+          const p = found.pieces[0];
+          const a = makeSvgAbbr(p.surface, p.key, p.expand, branch);
+          // Keep the original <text> (and its x/y/class) inside the link.
+          a.removeChild(a.firstChild);
+          el.parentNode.insertBefore(a, el);
+          a.appendChild(el);
+          wrapped += found.count;
+          continue;
+        }
+      }
+      const textNodes = direct.filter((n) => n.nodeType === 3 && n.nodeValue);
+      for (const textNode of textNodes) {
+        const found = matchAbbrPieces(textNode.nodeValue, branch, skip);
+        if (!found) continue;
+        const frag = document.createDocumentFragment();
+        for (const p of found.pieces) {
+          if (p.type === "text") frag.appendChild(document.createTextNode(p.value));
+          else frag.appendChild(makeSvgAbbr(p.surface, p.key, p.expand, branch));
+        }
+        textNode.parentNode.insertBefore(frag, textNode);
+        textNode.parentNode.removeChild(textNode);
+        wrapped += found.count;
+      }
+    }
   }
   return wrapped;
 }
