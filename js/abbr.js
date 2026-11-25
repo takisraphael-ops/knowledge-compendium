@@ -718,6 +718,16 @@ export function isDiagramAbbrSurface(surface, key, expand) {
       return words.length >= 2 && caps >= 2;
     });
     if (official) return true;
+    // Single-word official expansions of short acronyms (SYN → Synchronise,
+    // ACK → Acknowledgement). Ordinary words whose glossary sense is a
+    // sentence starting with The/A/An (SEGMENT, FRAME, NETWORK) stay unwrapped.
+    const officialWord = senses.some((ex) => {
+      const s = String(ex || "").trim().split(/\s*·\s*/)[0].trim();
+      if (/^(the|a|an)\s/i.test(s)) return false;
+      const words = s.split(/\s+/).filter(Boolean);
+      return words.length === 1 && /^[A-Z]/.test(words[0]) && words[0].length > core.length;
+    });
+    if (officialWord) return true;
     return false;
   }
   return false;
@@ -737,6 +747,10 @@ function matchAbbrPieces(text, branch, skip) {
     const expand = resolveAbbr(key, branch);
     if (!expand) continue;
     if (!isDiagramAbbrSurface(m[0], key, expand)) continue;
+    // Do not split hyphenated compounds (SYN-SENT, SYN-RECEIVED).
+    const prev = m.index > 0 ? text[m.index - 1] : "";
+    const nextCh = text[m.index + m[0].length] || "";
+    if (/[A-Za-z0-9-]/.test(prev) || /[A-Za-z0-9-]/.test(nextCh)) continue;
     const forms = [raw, m[0], key, expand];
     if (forms.some((f) => f && skip.has(String(f).toLowerCase()))) continue;
     changed = true;

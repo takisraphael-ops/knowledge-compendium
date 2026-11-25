@@ -1677,6 +1677,8 @@ figure.kc-diagram figcaption {
 .kc-d-ip { fill: #f6e59a; }
 .kc-d-eth { fill: #cbbcd9; }
 .kc-d-bits { fill: #f3f1ec; }
+.kc-d-rst { fill: #f0cfd3; }
+.kc-d-fin { fill: #cbbcd9; }
 .kc-d-div { stroke: #4d7370; stroke-width: 1; }
 
 /* Desktop / mobile variants of a two-sided diagram. */
