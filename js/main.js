@@ -38,7 +38,7 @@ import {
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise } from "./revise.js";
 import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips, setGlossaryOpener } from "./abbr.js";
-import { buildGlossary, initGlossary, showGlossary, hideGlossary, isGlossaryVisible, clearGlossarySession, glossaryHash, getGlossaryEntry } from "./glossary.js";
+import { buildGlossary, initGlossary, showGlossary, hideGlossary, isGlossaryVisible, clearGlossarySession, glossaryHash, getGlossaryEntry, glossarySlug } from "./glossary.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -2159,7 +2159,7 @@ function wireChrome() {
     els: { glossary: els.glossary, glossaryBtn: els.glossaryBtn },
   });
   setGlossaryOpener(({ key, branch }) => {
-    openGlossary({ slug: key ? String(key).toLowerCase().replace(/&/g, "-").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") : null, branch: branch || null, push: true });
+    openGlossary({ slug: key ? glossarySlug(key) : null, branch: branch || null, push: true });
   });
   els.reviseBtn?.addEventListener("click", () => {
     if (state.mode === "revise") leaveRevise();

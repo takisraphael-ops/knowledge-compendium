@@ -11,12 +11,12 @@ let filterTimer = 0;
 let io = null;
 
 export function glossarySlug(key) {
-  return String(key || "")
-    .trim()
-    .toLowerCase()
-    .replace(/&/g, "-")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "term";
+  const raw = String(key || "").trim();
+  let s = raw.toLowerCase().replace(/&/g, "-");
+  s = s.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "");
+  if (s) return s;
+  const hex = [...raw].map((c) => c.codePointAt(0).toString(16)).join("-");
+  return hex ? `sym-${hex}` : "term";
 }
 
 export function glossaryHash(slug, branch) {
@@ -29,6 +29,10 @@ export function glossaryHash(slug, branch) {
 
 export function glossaryStats() {
   return { size: catalog.size, letters: new Set(catalog.entries.map((e) => e.letter)).size };
+}
+
+export function listGlossaryEntries() {
+  return catalog.entries;
 }
 
 export function getGlossaryEntry(slug) {
@@ -100,25 +104,64 @@ function cleanDef(text) {
 
 const ACR_IN_TERM = /(?:^|\s)\(?((?:Wi-Fi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|OAuth(?:\s*2\.0)?|DDoS|ATT&CK|IPv[46]|802\.\d{1,2}[A-Za-z]{0,3}|CSMA\/C[AD]|TACACS\+|SHA-?\d{1,3}|[A-Z][A-Z0-9+]{1,10}|[A-Z]{2,8}\/[A-Z]{2,6}|[A-Z]{2,8}-[A-Z0-9]{1,8}))\)?(?:\s*$)/;
 
+function looksLikeAcronym(s) {
+  const raw = String(s || "").trim();
+  if (!raw || /\s/.test(raw)) return false;
+  if (/[^\x00-\x7F]/.test(raw)) return false;
+  if (/^\/\?$/.test(raw) || /^\/[A-Za-z0-9?]+$/.test(raw)) return true;
+  if (/[a-z]/.test(raw) && !/^(Wi-Fi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|OAuth(?:\s*2\.0)?|IPv[46]|DDoS|eSIM|iSCSI|IaaS|PaaS|SaaS|PoE|QoS|IPsec|NVMe|PCIe|x86(?:-64)?)$/i.test(raw) && !/^802\./.test(raw)) {
+    return false;
+  }
+  const key = canonicalAbbrKey(raw);
+  if (!key) return false;
+  if (/^[A-Z][A-Z0-9+]{1,12}$/.test(key)) return true;
+  if (/^[A-Z]{2,8}\/[A-Z]{2,6}$/.test(key)) return true;
+  if (/^802\.\d{1,2}[A-Z]{0,3}$/.test(key)) return true;
+  if (/^IPV[46]$/.test(key) || /^WIFI(?:-6E|-6|-7|-5|-4)?$/.test(key)) return true;
+  if (/^SHA-\d{1,3}$/.test(key) || key === "3DES" || key === "ATT&CK") return true;
+  if (/^[A-Z]{2,8}-[A-Z0-9]{1,12}$/.test(key)) return true;
+  if (key === "PCIE" || key === "NVME" || key === "IPSEC" || key === "OAUTH" || key === "OAUTH-2" || key === "DDOS") return true;
+  return false;
+}
+
+function looksLikeExpansion(acr, phrase) {
+  const p = norm(phrase);
+  if (!p) return false;
+  if (/^[a-z]{1,12}$/.test(p)) return false; // qualifiers such as "role", "type"
+  const initials = p.split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w[0]).join("");
+  const key = (canonicalAbbrKey(acr) || String(acr || "")).toUpperCase();
+  if (initials && key && initials.toUpperCase() === key) return true;
+  if (/^\/\?$/.test(acr) && /command help/i.test(p)) return true;
+  if (p.length >= 10 && /[A-Z]/.test(p)) return true;
+  return false;
+}
+
 function parseTerm(term) {
   const t = norm(term);
-  if (!t) return { title: "", acr: "", phrase: "" };
+  if (!t) return { title: "", acr: "", phrase: "", aliases: [] };
   let m = t.match(/^(.+?)\s+\(([^\)]+)\)\s*$/);
   if (m) {
     const inside = m[2].trim();
     const phrase = m[1].trim();
-    const key = canonicalAbbrKey(inside);
-    if (key && key.length <= 16 && !/\s/.test(inside)) {
-      return { title: inside, acr: key, phrase };
+    if (looksLikeAcronym(inside) && !/\s/.test(inside)) {
+      const aliases = [];
+      if (phrase) aliases.push(phrase);
+      return { title: inside, acr: canonicalAbbrKey(inside) || inside, phrase, aliases };
     }
-    const key2 = canonicalAbbrKey(phrase);
-    if (key2 && /^[A-Z0-9].*$/.test(phrase) && phrase.length <= 20 && !/\s/.test(phrase.replace(/[.\-\/+\s]/g, ""))) {
-      return { title: phrase, acr: key2, phrase: inside };
+    if (looksLikeAcronym(phrase) && phrase.length <= 24 && !/\s/.test(phrase.replace(/[.\-\/+\s]/g, ""))) {
+      const expand = looksLikeExpansion(phrase, inside) ? inside : "";
+      const aliases = [];
+      if (expand) aliases.push(expand);
+      return { title: phrase, acr: canonicalAbbrKey(phrase) || phrase, phrase: expand, aliases };
     }
+    // Annotation in parens (CJK original, translation, etc.): keep the Latin or main phrase as the title.
+    const aliases = [];
+    if (inside && inside !== phrase) aliases.push(inside);
+    return { title: phrase, acr: looksLikeAcronym(phrase) ? (canonicalAbbrKey(phrase) || "") : "", phrase: inside, aliases };
   }
-  const bare = t.match(/^(Wi-Fi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|OAuth(?:\s*2\.0)?|DDoS|ATT&CK|IPv[46]|802\.\d{1,2}[A-Za-z]{0,3}|CSMA\/C[AD]|[A-Z][A-Z0-9+]{1,12}|[A-Z]{2,8}\/[A-Z]{2,6})$/);
-  if (bare) return { title: bare[1], acr: canonicalAbbrKey(bare[1]), phrase: "" };
-  return { title: t, acr: "", phrase: "" };
+  const bare = t.match(/^(Wi-Fi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|OAuth(?:\s*2\.0)?|DDoS|ATT&CK|IPv[46]|802\.\d{1,2}[A-Za-z]{0,3}|CSMA\/C[AD]|[A-Z][A-Z0-9+]{1,12}|[A-Z]{2,8}\/[A-Z]{2,6}|\/\?)$/);
+  if (bare) return { title: bare[1], acr: looksLikeAcronym(bare[1]) ? (canonicalAbbrKey(bare[1]) || bare[1]) : "", phrase: "", aliases: [] };
+  return { title: t, acr: "", phrase: "", aliases: [] };
 }
 
 function topSectionId(index, subjects, nodeId) {
@@ -166,31 +209,65 @@ function branchTitle(slug, subjects) {
   return (subjects || []).find((s) => s.slug === slug)?.title || slug || "";
 }
 
-function upsertEntry(title, acr) {
-  const display = acr ? (prettyAcr(acr, title) || title) : title;
-  const slug = glossarySlug(acr || title);
+function addAlias(entry, alias, trusted = false) {
+  const a = norm(alias);
+  if (!a || a.length > 80) return;
+  if (a.toLowerCase() === (entry.title || "").toLowerCase()) return;
+  if (entry.acr && a.toLowerCase() === prettyAcr(entry.acr, entry.acr).toLowerCase()) return;
+  if (entry.also.some((x) => x.toLowerCase() === a.toLowerCase())) return;
+  if (!trusted && !aliasBelongs(entry, a)) return;
+  entry.also.push(a);
+}
+
+function aliasBelongs(entry, alias) {
+  const a = norm(alias);
+  if (!a) return false;
+  const title = entry.title || "";
+  const acr = prettyAcr(entry.acr, entry.acr) || entry.acr || "";
+  if (a.toLowerCase() === title.toLowerCase()) return false;
+  // Genuine variants: the expansion phrase, a romanisation/original, or a typographic twin.
+  if (acr && a.toLowerCase() === acr.toLowerCase()) return false;
+  const compact = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const ca = compact(a);
+  const ct = compact(title);
+  const ck = compact(acr);
+  if (ca && (ca === ct || ca === ck)) return true;
+  if (title && (title.toLowerCase().includes(a.toLowerCase()) || a.toLowerCase().includes(title.toLowerCase()))) {
+    if (Math.min(title.length, a.length) >= 2) return true;
+  }
+  if (acr && (a.toLowerCase().includes(acr.toLowerCase()) || acr.toLowerCase().includes(a.toLowerCase()))) return true;
+  const initials = a.split(/[^A-Za-z0-9]+/).filter(Boolean).map((w) => w[0]).join("").toLowerCase();
+  if (ck && initials && initials === ck.toLowerCase()) return true;
+  for (const s of entry.senses || []) {
+    const ex = s.expand || "";
+    if (ex && (ex.toLowerCase() === a.toLowerCase() || ex.toLowerCase().includes(a.toLowerCase()) || a.toLowerCase().includes(ex.toLowerCase()))) return true;
+  }
+  // CJK / non-Latin original next to a Latin title (Chi / 地), or a symbol form such as /?.
+  if (/[^\x00-\x7F]/.test(a) && /[A-Za-z]/.test(title)) return true;
+  if (/^\/\?$/.test(a) || /^command help$/i.test(a)) return true;
+  return false;
+}
+
+function upsertEntry(title, acr, aliases = []) {
+  const acrKey = acr && looksLikeAcronym(acr) ? (canonicalAbbrKey(acr) || acr) : (acr || "");
+  const display = acrKey ? (prettyAcr(acrKey, title) || title) : title;
+  const slug = glossarySlug(acrKey || title);
   let entry = catalog.bySlug.get(slug);
   if (!entry) {
     entry = {
       slug,
       title: display,
-      acr: acr || "",
+      acr: acrKey || "",
       also: [],
       letter: letterOf(display),
       senses: [],
     };
     catalog.bySlug.set(slug, entry);
     catalog.entries.push(entry);
-  } else if (display && display !== entry.title) {
-    const alt = display;
-    if (alt && !entry.also.includes(alt) && alt.toLowerCase() !== entry.title.toLowerCase()) {
-      entry.also.push(alt);
-    }
   }
-  if (title && title !== entry.title && !entry.also.includes(title)) {
-    const short = title.length < 80;
-    if (short && title.toLowerCase() !== entry.title.toLowerCase()) entry.also.push(title);
-  }
+  for (const al of aliases || []) addAlias(entry, al, true);
+  if (title && title !== entry.title) addAlias(entry, title);
+  if (display && display !== entry.title) addAlias(entry, display);
   return entry;
 }
 
@@ -213,6 +290,7 @@ function prettyAcr(key, fallback) {
   if (key === "OAUTH-2") return "OAuth 2.0";
   if (key === "DDOS") return "DDoS";
   if (key === "ATT&CK") return "ATT&CK";
+  if (key === "/?" || key === "SYM-2F-3F") return "/?";
   return fallback && /[a-z]/.test(fallback) ? fallback : key;
 }
 
@@ -274,6 +352,9 @@ function mergeSenses(senses) {
       const oek = expandKey(o.expand);
       if (ek && oek && (ek === oek || ek.includes(oek) || oek.includes(ek))) return true;
       if (!ek && !oek && dk && expandKey(o.def).slice(0, 48) === dk) return true;
+      const da = expandKey(raw.def);
+      const db = expandKey(o.def);
+      if (da && db && (da.slice(0, 40) === db.slice(0, 40) || da.includes(db.slice(0, 48)) || db.includes(da.slice(0, 48)))) return true;
       return false;
     });
     if (!hit) {
@@ -301,6 +382,102 @@ function mergeSenses(senses) {
     for (const x of raw.glossaries || []) addRef(hit.glossaries, x);
   }
   return out;
+}
+
+
+function foldTitle(t) {
+  return norm(t).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function isCommandHelpTitle(e) {
+  const s = foldTitle(e.title);
+  return s === "/?" || e.slug === "sym-2f-3f" || s === "command help" || s === "command help /?";
+}
+
+function commandHelpPair(a, b) {
+  return isCommandHelpTitle(a) && isCommandHelpTitle(b);
+}
+
+function shouldMergeEntries(a, b) {
+  if (a === b) return false;
+  if (a.slug === b.slug) return true;
+  if (foldTitle(a.title) === foldTitle(b.title) && foldTitle(a.title)) return true;
+  if (commandHelpPair(a, b)) return true;
+  const ap = parseTerm(a.title);
+  const bp = parseTerm(b.title);
+  if (ap.acr && (glossarySlug(ap.acr) === b.slug || glossarySlug(ap.title) === b.slug)) return true;
+  if (bp.acr && (glossarySlug(bp.acr) === a.slug || glossarySlug(bp.title) === a.slug)) return true;
+  return false;
+}
+
+function absorbEntry(keep, other) {
+  if (other.title && other.title !== keep.title) addAlias(keep, other.title);
+  for (const al of other.also || []) addAlias(keep, al);
+  if (other.acr && !keep.acr) keep.acr = other.acr;
+  for (const s of other.senses || []) {
+    addSense(keep, {
+      branch: s.branch,
+      branchTitle: s.branchTitle,
+      sectionId: s.sectionId,
+      sectionTitle: s.sectionTitle,
+      expand: s.expand,
+      def: s.def,
+      topics: s.topics,
+      glossaries: s.glossaries,
+    });
+  }
+}
+
+function preferredEntry(a, b) {
+  // Prefer a short acronym or symbol title when the other is a long expansion.
+  const aAcr = !!(a.acr || looksLikeAcronym(a.title));
+  const bAcr = !!(b.acr || looksLikeAcronym(b.title));
+  if (aAcr && !bAcr) return a;
+  if (bAcr && !aAcr) return b;
+  if ((a.senses || []).length !== (b.senses || []).length) {
+    return (a.senses || []).length >= (b.senses || []).length ? a : b;
+  }
+  return (a.title || "").length <= (b.title || "").length ? a : b;
+}
+
+function mergeDuplicateEntries() {
+  const buckets = new Map();
+  const put = (key, e) => {
+    if (!key) return;
+    if (!buckets.has(key)) buckets.set(key, new Set());
+    buckets.get(key).add(e);
+  };
+  for (const e of catalog.entries) {
+    put("s:" + e.slug, e);
+    const ft = foldTitle(e.title);
+    if (ft) put("f:" + ft, e);
+    if (isCommandHelpTitle(e)) put("cmdhelp", e);
+    if (e.acr) put("a:" + glossarySlug(e.acr), e);
+    const parsed = parseTerm(e.title);
+    if (parsed.acr) put("a:" + glossarySlug(parsed.acr), e);
+  }
+  for (const set of buckets.values()) {
+    const arr = [...set];
+    if (arr.length < 2) continue;
+    let keep = arr[0];
+    for (let i = 1; i < arr.length; i++) {
+      const other = arr[i];
+      if (keep === other) continue;
+      if (catalog.bySlug.get(keep.slug) !== keep) {
+        keep = other;
+        continue;
+      }
+      if (catalog.bySlug.get(other.slug) !== other) continue;
+      if (!shouldMergeEntries(keep, other)) continue;
+      const pref = preferredEntry(keep, other);
+      const drop = pref === keep ? other : keep;
+      keep = pref;
+      absorbEntry(keep, drop);
+      catalog.entries = catalog.entries.filter((x) => x !== drop);
+      catalog.bySlug.delete(drop.slug);
+      catalog.bySlug.set(keep.slug, keep);
+    }
+  }
 }
 
 /**
@@ -332,7 +509,9 @@ export function buildGlossary(nodeIndex, ctx = {}) {
       for (const [term, def] of glossTerms(node.expanded)) {
         const parsed = parseTerm(term);
         if (!parsed.title) continue;
-        const entry = upsertEntry(parsed.acr ? prettyAcr(parsed.acr, parsed.title) : parsed.title, parsed.acr);
+        const aliases = [...(parsed.aliases || [])];
+        if (parsed.phrase) aliases.push(parsed.phrase);
+        const entry = upsertEntry(parsed.acr ? prettyAcr(parsed.acr, parsed.title) : parsed.title, parsed.acr, aliases);
         const expand = parsed.phrase || parsed.acr || "";
         const links = extractLinks(def);
         addSense(entry, {
@@ -402,13 +581,15 @@ export function buildGlossary(nodeIndex, ctx = {}) {
     }
   }
 
+  mergeDuplicateEntries();
+
   // Tidy also-known-as, merge duplicate senses, and sort
   for (const e of catalog.entries) {
-    e.also = e.also.filter((a) => a && a.toLowerCase() !== e.title.toLowerCase()).slice(0, 6);
+    e.also = (e.also || []).filter((a) => aliasBelongs(e, a)).slice(0, 6);
     e.senses = mergeSenses(e.senses);
     e.senses.sort((a, b) => (a.branchTitle || a.branch).localeCompare(b.branchTitle || b.branch) || (a.expand || "").localeCompare(b.expand || ""));
   }
-  catalog.entries.sort((a, b) => a.letter.localeCompare(b.letter) || a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+  catalog.entries.sort((a, b) => a.letter.localeCompare(b.letter) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: "base" }));
   catalog.size = catalog.entries.length;
   return { size: catalog.size };
 }
@@ -533,8 +714,15 @@ function paintList(root, { slug, branch, query } = {}) {
     const entries = grouped.get(L) || [];
     body.innerHTML = entries.map((e) => renderEntry(e, { targetSlug: slug, activeBranch: branch })).join("");
     body.dataset.ready = "1";
-    for (const el of body.querySelectorAll(".gloss-def, .gloss-expand")) {
-      wrapPanelAbbrs(el, branch || "");
+    for (const el of body.querySelectorAll(".gloss-def")) {
+      const article = el.closest(".gloss-entry");
+      const entry = article ? getGlossaryEntry(article.getAttribute("data-slug") || "") : null;
+      const skip = [];
+      if (entry) {
+        skip.push(entry.title, entry.acr, ...(entry.also || []));
+        for (const s of entry.senses || []) if (s.expand) skip.push(s.expand);
+      }
+      wrapPanelAbbrs(el, branch || "", { skip });
     }
   };
   list._fillLetter = fillLetter;

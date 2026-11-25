@@ -551,8 +551,9 @@ function glossaryHref(key, branch) {
   return b ? `#/glossary/${encodeURIComponent(s)}/${encodeURIComponent(b)}` : `#/glossary/${encodeURIComponent(s)}`;
 }
 
-export function wrapPanelAbbrs(root, branch) {
+export function wrapPanelAbbrs(root, branch, opts = {}) {
   if (!root || !index.re) return 0;
+  const skip = new Set((opts.skip || []).filter(Boolean).map((s) => String(s).toLowerCase()));
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
@@ -575,6 +576,8 @@ export function wrapPanelAbbrs(root, branch) {
       const key = index.surfaceToKey.get(raw) || canonicalAbbrKey(raw);
       const expand = resolveAbbr(key, branch);
       if (!expand) continue;
+      const forms = [raw, m[0], key, expand];
+      if (forms.some((f) => f && skip.has(String(f).toLowerCase()))) continue;
       changed = true;
       pieces.push(document.createTextNode(text.slice(last, m.index)));
       const abbr = document.createElement("a");

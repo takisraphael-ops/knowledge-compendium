@@ -1456,7 +1456,7 @@ body.glossary-open.panel-open .map-controls { visibility: hidden; pointer-events
 .gloss-top {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 16px 20px;
   margin: 0 0 14px;
 }
 .gloss-top-title { min-width: 0; flex: 1; }
@@ -1581,9 +1581,16 @@ body.glossary-open.panel-open .map-controls { visibility: hidden; pointer-events
 
 @media (max-width: 700px) {
   .gloss-page { padding: 8px 14px max(40px, env(safe-area-inset-bottom)); }
-  .gloss-top { padding-top: max(4px, env(safe-area-inset-top)); }
+  .gloss-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    padding-top: max(4px, env(safe-area-inset-top));
+    margin-bottom: 16px;
+  }
   .gloss-top h1 { font-size: 1.5rem; }
-  .gloss-back { max-width: 58vw; }
+  .gloss-kicker { margin-top: 6px; }
+  .gloss-back { max-width: 100%; }
   .gloss-jump-link { min-width: 36px; min-height: 40px; }
   #glossary-btn { min-height: 44px; }
 }
