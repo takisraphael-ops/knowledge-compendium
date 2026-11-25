@@ -3,6 +3,7 @@
  * Scheduling writes only ids and SM-2 fields to localStorage.
  */
 import { escapeHtml, renderNotes } from "./notes.js";
+import { wrapPanelAbbrs } from "./abbr.js";
 import { collectCards, SY0_DOMAINS } from "./cards.js";
 import {
   loadStore,
@@ -142,6 +143,10 @@ function render() {
   if (view === "study") el.innerHTML = renderStudy();
   else if (view === "summary") el.innerHTML = renderSummary();
   else el.innerHTML = renderHub();
+  if (view === "study") {
+    const card = queue[cursor];
+    wrapPanelAbbrs(el.querySelector(".rev-study-body") || el, card?.branchSlug || "");
+  }
 }
 
 function renderHub() {

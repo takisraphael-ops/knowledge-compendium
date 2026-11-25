@@ -8,13 +8,41 @@ const GENERIC = new Set([
   "EU", "AM", "PM", "TV", "HR", "CEO", "CFO", "CTO", "THE", "AND", "FOR", "NOT",
 ]);
 
-const ACR_IN_TERM = /\b([A-Z][A-Z0-9]{1,7})(?:s)?\b/g;
+/**
+ * Units and product / exam family codes. Harvested or not, these are not
+ * wrapped as acronyms. Genuine initialisms such as SKU are not listed here.
+ */
+const UNIT_OR_PRODUCT = new Set([
+  "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB",
+  "KIB", "MIB", "GIB", "TIB", "PIB",
+  "BIT", "KBIT",
+  "HZ", "KHZ", "MHZ", "GHZ", "THZ",
+  "BPS", "KBPS", "MBPS", "GBPS", "TBPS",
+  "DB", "DBM", "DBI", "DBA", "DBW", "DBUV",
+  "RPM", "FPS", "DPI", "PPI", "SPI",
+  "MAH", "AH", "WH", "KWH", "VA", "KVA",
+  "NM", "MM", "CM", "KM", "KG", "MG",
+  "MS", "NS", "PS",
+  "SY0", "XK0", "PT0", "PK0", "CS0", "N10", "N10-009",
+  "220-1201", "220-1202", "220-1101", "220-1102",
+  "H100", "H200", "B200", "A100", "A10",
+  "RTX", "GTX",
+  "II", "III", "IV", "VI", "VII", "VIII", "IX",
+  "XI", "XII", "XIII", "XIV", "XV", "XVI", "XIX", "XX", "XXI",
+]);
+
+/** Token as it appears in a term title (paren or bare). */
+const ACR_TOKEN = String.raw`(?:Wi-Fi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|WiFi(?:\s*6E|\s*6|\s*7|\s*5|\s*4)?|OAuth(?:\s*2\.0)?|DDoS|ATT&CK|SD-WAN|WS-Federation|LLDP-MED|VT-x|IPv[46]|802\.\d{1,2}[A-Za-z]{0,3}|CSMA\/C[AD]|TACACS\+|SHA-?\d{1,3}|MD5|3DES|NVMe|QoS|PoE|IPsec|IPSec|PCIe|PCI-E|[A-Z][A-Z0-9]{1,8}\+?|[A-Z]{2,8}\/[A-Z]{2,6}|[A-Z]{2,8}-[A-Z0-9]{1,8})`;
 
 let index = {
   /** @type {Map<string, {expand: string, branch: string, src: string}[]>} */
   byAcr: new Map(),
   /** @type {RegExp|null} */
   re: null,
+  /** @type {Map<string, string>} */
+  surfaceToKey: new Map(),
+  /** @type {Map<string, Set<string>>} */
+  extraSurfaces: new Map(),
 };
 
 function normExpand(s) {
@@ -35,15 +63,139 @@ function uniqueExpands(rows) {
   return out;
 }
 
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Canonical map key for a surface form.
+ * CIDR→CIDR, IPv4→IPV4, QoS→QOS, Wi-Fi 6E→WIFI-6E, 802.1X→802.1X,
+ * CSMA/CA→CSMA/CA, TACACS+→TACACS+, SHA-256→SHA-256, NVMe→NVME.
+ */
+export function canonicalAbbrKey(s) {
+  const raw = String(s || "").trim();
+  if (!raw) return "";
+  const wifi = raw.match(/^wi-?fi(?:\s*(6e|6|7|5|4))?$/i);
+  if (wifi) return wifi[1] ? `WIFI-${wifi[1].toUpperCase()}` : "WIFI";
+  const oauth = raw.match(/^oauth(?:\s*2(?:\.0)?)?$/i);
+  if (oauth) return /2/.test(raw) ? "OAUTH-2" : "OAUTH";
+  if (/^ddos$/i.test(raw)) return "DDOS";
+  if (/^att&ck$/i.test(raw)) return "ATT&CK";
+  if (/^sd-wan$/i.test(raw)) return "SD-WAN";
+  if (/^ws-federation$/i.test(raw)) return "WS-FEDERATION";
+  if (/^lldp-med$/i.test(raw)) return "LLDP-MED";
+  if (/^vt-x$/i.test(raw)) return "VT-X";
+  const ipv = raw.match(/^ipv([46])$/i);
+  if (ipv) return `IPV${ipv[1]}`;
+  const ieee = raw.match(/^(802\.\d{1,2}[A-Za-z]{0,3})$/i);
+  if (ieee) return ieee[1].toUpperCase();
+  const sha = raw.match(/^(SHA)-?(\d{1,3})$/i);
+  if (sha) return `SHA-${sha[2]}`;
+  if (/^pci-?e$/i.test(raw)) return "PCIE";
+  if (/^ipsec$/i.test(raw)) return "IPSEC";
+  if (/^nvme$/i.test(raw)) return "NVME";
+  return raw.toUpperCase();
+}
+
+function allowedKey(key) {
+  if (!key || GENERIC.has(key) || UNIT_OR_PRODUCT.has(key)) return false;
+  if (/^[A-Z][A-Z0-9]{1,8}$/.test(key)) return true;
+  if (/^[A-Z][A-Z0-9]{1,8}\+$/.test(key)) return true;
+  if (/^[A-Z]{2,8}\/[A-Z]{2,4}$/.test(key)) return true;
+  if (/^802\.\d{1,2}[A-Z]{0,3}$/.test(key)) return true;
+  if (/^IPV[46]$/.test(key)) return true;
+  if (/^WIFI(?:-6E|-6|-7|-5|-4)?$/.test(key)) return true;
+  if (/^SHA-\d{1,3}$/.test(key)) return true;
+  if (key === "3DES") return true;
+  if (key === "ATT&CK") return true;
+  if (/^[A-Z]{2,8}-[A-Z0-9]{1,12}$/.test(key)) return true;
+  if (key === "WS-FEDERATION") return true;
+  if (/^[A-Z]{2,8}\/[A-Z]{2,6}$/.test(key)) return true;
+  if (key === "PCIE" || key === "NVME" || key === "IPSEC") return true;
+  return false;
+}
+
+function surfacesFor(key) {
+  const set = new Set();
+  const extras = index.extraSurfaces?.get(key);
+  if (extras) for (const s of extras) set.add(s);
+  if (key === "OAUTH") {
+    set.add("OAuth"); set.add("OAUTH");
+  } else if (key === "OAUTH-2") {
+    set.add("OAuth 2.0"); set.add("OAuth2"); set.add("OAUTH 2.0");
+  } else if (key === "DDOS") {
+    set.add("DDoS"); set.add("DDOS");
+  } else if (key === "ATT&CK") {
+    set.add("ATT&CK");
+  } else if (key === "SD-WAN") {
+    set.add("SD-WAN");
+  } else if (key === "WS-FEDERATION") {
+    set.add("WS-Federation"); set.add("WS-FEDERATION");
+  } else if (key === "LLDP-MED") {
+    set.add("LLDP-MED");
+  } else if (key === "VT-X") {
+    set.add("VT-x"); set.add("VT-X");
+  } else if (key === "ISCSI") {
+    set.add("iSCSI"); set.add("ISCSI");
+  } else if (key === "ESIM") {
+    set.add("eSIM"); set.add("ESIM");
+  } else if (key === "IAAS") {
+    set.add("IaaS"); set.add("IAAS");
+  } else if (key === "PAAS") {
+    set.add("PaaS"); set.add("PAAS");
+  } else if (key === "SAAS") {
+    set.add("SaaS"); set.add("SAAS");
+  } else if (key === "WIFI") {
+    set.add("Wi-Fi"); set.add("WiFi"); set.add("WIFI");
+  } else if (key === "WIFI-6") {
+    set.add("Wi-Fi 6"); set.add("WiFi 6");
+  } else if (key === "WIFI-6E") {
+    set.add("Wi-Fi 6E"); set.add("WiFi 6E");
+  } else if (key === "WIFI-7") {
+    set.add("Wi-Fi 7"); set.add("WiFi 7");
+  } else if (key === "WIFI-5") {
+    set.add("Wi-Fi 5"); set.add("WiFi 5");
+  } else if (key === "WIFI-4") {
+    set.add("Wi-Fi 4"); set.add("WiFi 4");
+  } else if (key === "IPV4") {
+    set.add("IPv4"); set.add("IPV4");
+  } else if (key === "IPV6") {
+    set.add("IPv6"); set.add("IPV6");
+  } else if (key === "QOS") {
+    set.add("QoS"); set.add("QOS");
+  } else if (key === "POE") {
+    set.add("PoE"); set.add("POE");
+  } else if (key === "IPSEC") {
+    set.add("IPsec"); set.add("IPSec"); set.add("IPSEC");
+  } else if (key === "NVME") {
+    set.add("NVMe"); set.add("NVME");
+  } else if (key === "PCIE") {
+    set.add("PCIe"); set.add("PCI-E"); set.add("PCIE");
+  } else if (key === "802.1X") {
+    set.add("802.1X"); set.add("802.1x");
+  } else if (/^802\.\d+[A-Z]+$/.test(key)) {
+    set.add(key);
+    set.add(key.replace(/[A-Z]+$/, (s) => s.toLowerCase()));
+  } else if (key.startsWith("SHA-")) {
+    set.add(key);
+    set.add(key.replace("-", ""));
+  } else {
+    set.add(key);
+  }
+  return [...set];
+}
+
 function stripSelfRef(acr, expand) {
   let e = normExpand(expand);
   if (!e) return "";
-  const key = acr.toUpperCase();
-  const trail = e.match(new RegExp("^(.*?)\\s*\\(" + key + "\\)\\s*$", "i"));
+  const key = canonicalAbbrKey(acr) || String(acr).toUpperCase();
+  const surfaces = [key, acr, ...surfacesFor(key)].map(escapeRe);
+  const alt = [...new Set(surfaces)].join("|");
+  const trail = e.match(new RegExp(`^(.*?)\\s*\\((?:${alt})\\)\\s*$`, "i"));
   if (trail && trail[1].trim()) e = trail[1].trim();
-  const lead = e.match(new RegExp("^" + key + "\\s*\\((.+)\\)\\s*$", "i"));
+  const lead = e.match(new RegExp(`^(?:${alt})\\s+\\((.+)\\)\\s*$`, "i"));
   if (lead) e = lead[1].trim();
-  e = e.replace(new RegExp("^" + key + "\\s+[—–-]\\s+", "i"), "");
+  e = e.replace(new RegExp(`^(?:${alt})\\s+[—–-]\\s+`, "i"), "");
   e = e.replace(/[.;]+$/, "").trim();
   return e;
 }
@@ -73,13 +225,11 @@ function pickBest(acr, phrases) {
     const e = stripSelfRef(acr, raw);
     if (!isPhrase(e)) continue;
     const k = senseKey(e);
-    if (!k || k === acr.toLowerCase() || seen.has(k)) continue;
+    if (!k || k === canonicalAbbrKey(acr).toLowerCase() || k === String(acr).toLowerCase() || seen.has(k)) continue;
     seen.add(k);
     cleaned.push(e);
   }
   if (!cleaned.length) return [];
-  // Merge near-duplicates: if one phrase contains another, keep the shorter clear name
-  // unless they look like genuinely different senses (share few words).
   const kept = [];
   const sorted = [...cleaned].sort((a, b) => a.length - b.length);
   for (const p of sorted) {
@@ -91,57 +241,154 @@ function pickBest(acr, phrases) {
     if (contained) continue;
     kept.push(p);
   }
-  // If a formal title-case name exists, drop informal usage notes.
   const formal = kept.filter((e) => /^[A-Z]/.test(e) && /[A-Za-z]{2,}\s+[A-Za-z]{2,}/.test(e) && !/\b(?:is|are|then)\b/.test(e));
   const pool = formal.length ? formal : kept;
   const long = pool.filter((e) => e.split(/\s+/).length >= 3);
   return long.length ? long : pool;
 }
 
+function shortDef(def) {
+  const d = normExpand(def);
+  if (!d) return "";
+  const named = d.match(/^([A-Z][^—–.(:]{2,90}?)(?:\s+[—–-]\s+|\s+\(|:\s|\.\s|$)/);
+  if (named && isPhrase(named[1].trim())) return named[1].trim();
+  const first = d.split(/(?<=\.)\s/)[0];
+  if (isPhrase(first)) return first;
+  const clause = d.split(/:\s/)[0];
+  if (isPhrase(clause)) return clause;
+  return first.length <= 110 ? first : first.slice(0, 110).replace(/\s+\S*$/, "");
+}
+
+
+function wordInitials(phrase) {
+  const parts = String(phrase || "").split(/[\s\/]+/).filter(Boolean);
+  const inits = [];
+  for (const p of parts) {
+    const cleaned = p.replace(/[(),.:]/g, "");
+    if (!cleaned) continue;
+    if (/^[A-Z]{2,8}(?:[+\-][A-Z0-9]+)?$/.test(cleaned)) inits.push(cleaned);
+    else if (cleaned.includes("-") && /[A-Za-z]/.test(cleaned)) {
+      for (const h of cleaned.split("-").filter(Boolean)) {
+        if (/^\d+$/.test(h)) inits.push(h);
+        else inits.push(h[0].toUpperCase());
+      }
+    } else if (/^\d+$/.test(cleaned) || /version/i.test(cleaned) && false) {
+      inits.push(cleaned);
+    } else if (/^v(?:ersion)?$/i.test(cleaned)) {
+      inits.push("V");
+    } else if (/^\d+[A-Za-z]+$/.test(cleaned)) {
+      inits.push(cleaned.toUpperCase());
+    } else {
+      inits.push(cleaned[0].toUpperCase());
+    }
+  }
+  return inits.join("");
+}
+
+function looksLikeExpansion(acr, phrase) {
+  const key = canonicalAbbrKey(acr).replace(/[^A-Z0-9]/g, "");
+  if (!key || !phrase) return false;
+  const full = wordInitials(phrase).replace(/[^A-Z0-9]/g, "");
+  if (full === key) return true;
+  const skip = /^(OF|THE|AND|A|AN|FOR|IN|ON|TO|OR|WITH|BY|FROM|OVER)$/;
+  const parts = String(phrase).split(/[\s\/]+/).filter((w) => w && !skip.test(w.replace(/[(),.:]/g, "").toUpperCase()));
+  const skipped = wordInitials(parts.join(" ")).replace(/[^A-Z0-9]/g, "");
+  if (skipped === key) return true;
+  // Quality of Service: include OF as O
+  const withSmall = wordInitials(phrase).replace(/[^A-Z0-9]/g, "");
+  if (withSmall === key) return true;
+  return false;
+}
+
 function harvestFromTerm(term, def, branch, src) {
   const t = String(term || "").trim();
   if (!t) return;
   const add = (acr, expand, prefer) => {
-    const key = String(acr || "").toUpperCase();
-    if (!/^[A-Z][A-Z0-9]{1,7}$/.test(key) || GENERIC.has(key)) return;
+    const key = canonicalAbbrKey(acr);
+    if (!allowedKey(key)) return;
     const ex = stripSelfRef(key, expand);
-    if (!isPhrase(ex) || ex.toUpperCase() === key) return;
+    if (!isPhrase(ex) || canonicalAbbrKey(ex) === key || ex.toUpperCase() === key) return;
     const list = index.byAcr.get(key) || [];
     list.push({ expand: ex, branch: branch || "", src: src || "", prefer: !!prefer });
     index.byAcr.set(key, list);
+    const surface = String(acr || "").trim();
+    if (surface && surface !== key) {
+      const set = index.extraSurfaces.get(key) || new Set();
+      set.add(surface);
+      index.extraSurfaces.set(key, set);
+    }
   };
 
-  // "Intrusion Detection System (IDS)" or "IDS (Intrusion Detection System)", even with a trailing word such as "address".
-  for (const m of t.matchAll(/([A-Za-z][A-Za-z0-9 +\/\-]{1,80}?)\s+\(([A-Z][A-Z0-9]{1,7}(?:\s*\/\s*[A-Z][A-Z0-9]{1,7})*)\)/g)) {
+  const tokenRe = new RegExp(`(${ACR_TOKEN})`, "g");
+
+  // "Intrusion Detection System (IDS)" or "IPv4 (Internet Protocol version 4)".
+  const phraseThenAcr = new RegExp(
+    "([A-Za-z][A-Za-z0-9 +/,.&'\u2013\u2014\u2019-]{1,100}?)\\s+\\((" + ACR_TOKEN + "(?:\\s*/\\s*" + ACR_TOKEN + ")*)\\)",
+    "g"
+  );
+  for (const m of t.matchAll(phraseThenAcr)) {
     const phrase = m[1].trim();
-    if (phrase && !/^[A-Z][A-Z0-9]{1,7}$/.test(phrase)) {
-      if (!m[2].includes("/")) add(m[2].trim(), phrase, true);
+    const inside = m[2].trim();
+    if (/^[A-Z][A-Z0-9]{1,8}$/.test(phrase) && !inside.includes("/")) continue;
+    if (!inside.includes("/")) {
+      // Glossary titles are curated; keyTerms may use "(ACR)" as a topic tag, so require initials there.
+      const lastSeg = phrase.split(/\s\/\s/).pop().trim();
+      const trustGloss = src === "glossary" && !/\s\/\s/.test(phrase);
+      if (looksLikeExpansion(inside, phrase) || trustGloss) add(inside, phrase, true);
+      else if (lastSeg !== phrase && (looksLikeExpansion(inside, lastSeg) || src === "glossary")) add(inside, lastSeg, true);
+    } else {
+      // Combined keys such as RTO/RPO, IDS/IPS from a glossary title.
+      if (src === "glossary") add(inside, phrase, true);
+      for (const part of inside.split(/\s*\/\s*/)) {
+        if (looksLikeExpansion(part, phrase)) add(part, phrase, false);
+      }
     }
   }
-  for (const m of t.matchAll(/(?:^|[^A-Za-z0-9/])([A-Z][A-Z0-9]{1,7})\s+\(([^)]+)\)/g)) {
+
+  // "IDS (Intrusion Detection System)", "CSMA/CA (Carrier Sense …)".
+  const acrThenPhrase = new RegExp(`(?:^|[^A-Za-z0-9/])(${ACR_TOKEN})\\s+\\(([^)]+)\\)`, "g");
+  for (const m of t.matchAll(acrThenPhrase)) {
     const inside = m[2].trim();
-    if (inside && !/^[A-Z][A-Z0-9/ ]{1,40}$/.test(inside)) add(m[1], inside, true);
+    if (inside && !/^[A-Z][A-Z0-9/ .]{1,40}$/.test(inside)) add(m[1], inside, true);
   }
-  // Bare "CISSP", "HPA axis": use the official name at the start of the definition.
-  const bare = t.match(/^([A-Z][A-Z0-9]{1,7})(?:\s+axis|\s+address)?$/i);
+
+  // Bare "CISSP", "802.1X", "HPA axis": official name at the start of the definition.
+  const bare = t.match(new RegExp(`^(${ACR_TOKEN})(?:\\s+axis|\\s+address|\\s+record)?$`, "i"));
   if (bare) {
-    let d = normExpand(def);
-    const named = d.match(/^([A-Z][^—–.(]{2,90}?)(?:\s+[—–-]\s+|\s+\(|\.\s|$)/);
-    d = named ? named[1].trim() : d.split(/(?<=\.)\s/)[0];
-    add(bare[1], d, src === "glossary");
+    add(bare[1], shortDef(def) || def, src === "glossary");
   }
+
   // "PCI DSS" / "Payment Card Industry Data Security Standards (PCI DSS)"
   for (const m of t.matchAll(/\(([A-Z][A-Z0-9]{1,7})(?:\s+[A-Z][A-Z0-9]{1,7})+\)/g)) {
     const phrase = t.replace(m[0], "").replace(/[()]/g, "").trim();
     if (phrase) add(m[1], phrase, true);
   }
+
   const compound = t.match(/^([A-Z][A-Z0-9]{1,7})\s+[A-Z][A-Z0-9]/);
   if (compound && !t.includes("(")) {
-    let d = normExpand(def);
-    const named = d.match(/^([A-Z][^—–.(]{2,90}?)(?:\s+[—–-]\s+|\s+\(|\.\s|$)/);
-    if (named) add(compound[1], named[1].trim(), src === "glossary");
-    else add(compound[1], t, true);
+    const named = shortDef(def);
+    if (named && looksLikeExpansion(compound[1], named)) add(compound[1], named, src === "glossary");
   }
+
+  // "802.11 / 802.11a/b/g/n/ac/ax/be"
+  if (/^802\.11\s*\/\s*802\.11/.test(t)) {
+    add("802.11", "IEEE 802.11 wireless LAN family", true);
+  }
+
+  // Combined marketing names: "Wi-Fi 4 / 5 / 6 / 6E / 7".
+  if (/^wi-?fi\s*4\s*\/\s*5\s*\/\s*6\s*\/\s*6E\s*\/\s*7$/i.test(t)) {
+    add("Wi-Fi", "IEEE 802.11 wireless networking (Wi-Fi Alliance trademark)", true);
+    add("Wi-Fi 4", "IEEE 802.11n (Wi-Fi Alliance marketing name)", true);
+    add("Wi-Fi 5", "IEEE 802.11ac (Wi-Fi Alliance marketing name)", true);
+    add("Wi-Fi 6", "IEEE 802.11ax (Wi-Fi Alliance marketing name)", true);
+    add("Wi-Fi 6E", "IEEE 802.11ax in the 6 GHz band (Wi-Fi Alliance marketing name)", true);
+    add("Wi-Fi 7", "IEEE 802.11be (Wi-Fi Alliance marketing name)", true);
+  }
+
+
+
+  // Fallback: any leftover parenthesised or leading token already handled.
+  void tokenRe;
 }
 
 function isGlossNode(node) {
@@ -161,13 +408,21 @@ function glossTerms(expanded) {
 }
 
 function compile() {
-  const keys = [...index.byAcr.keys()].sort((a, b) => b.length - a.length || a.localeCompare(b));
-  if (!keys.length) {
+  const forms = [];
+  index.surfaceToKey = new Map();
+  for (const key of index.byAcr.keys()) {
+    for (const s of surfacesFor(key)) {
+      forms.push(s);
+      if (!index.surfaceToKey.has(s)) index.surfaceToKey.set(s, key);
+    }
+  }
+  if (!forms.length) {
     index.re = null;
     return;
   }
-  const alt = keys.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  index.re = new RegExp(`(?<![A-Za-z0-9/])(${alt})s?(?![A-Za-z0-9/])`, "g");
+  forms.sort((a, b) => b.length - a.length || a.localeCompare(b));
+  const alt = forms.map(escapeRe).join("|");
+  index.re = new RegExp(`(?<![A-Za-z0-9/&])(${alt})s?(?![A-Za-z0-9/.&\u2080-\u2089])`, "g");
 }
 
 /**
@@ -176,7 +431,7 @@ function compile() {
  * @param {{ nodeBranch?: Map<string, string>, subjects?: { slug: string, rootId: string }[] }} ctx
  */
 export function buildAbbrIndex(nodeIndex, ctx = {}) {
-  index = { byAcr: new Map(), re: null };
+  index = { byAcr: new Map(), re: null, surfaceToKey: new Map(), extraSurfaces: new Map() };
   const nodeBranch = ctx.nodeBranch;
   const subjects = ctx.subjects || [];
   const branchOf = (id) => {
@@ -217,12 +472,24 @@ export function abbrStats() {
   return { size: index.byAcr.size };
 }
 
+export function listAbbrKeys() {
+  return [...index.byAcr.keys()].sort();
+}
+
+export function abbrSkipList() {
+  return {
+    generic: [...GENERIC].sort(),
+    unitsAndProductCodes: [...UNIT_OR_PRODUCT].sort(),
+  };
+}
+
 /**
  * Resolve an expansion for this branch. If two senses exist here, show both.
  * If this branch has none and other branches disagree, skip (return "").
  */
 export function resolveAbbr(acr, branch) {
-  const key = String(acr || "").toUpperCase();
+  const key = canonicalAbbrKey(acr);
+  if (!allowedKey(key)) return "";
   const rows = index.byAcr.get(key) || [];
   if (!rows.length) return "";
   const favoured = (list) => {
@@ -247,6 +514,7 @@ function skipNode(node, root) {
   let el = node.nodeType === 3 ? node.parentElement : node;
   while (el && el !== root) {
     if (SKIP_TAGS.has(el.tagName)) return true;
+    if (el.isContentEditable) return true;
     const cl = el.classList;
     if (cl && (cl.contains("term-run") || cl.contains("key-terms") || cl.contains("jump-bar") || cl.contains("crumbs"))) return true;
     el = el.parentElement;
@@ -254,20 +522,12 @@ function skipNode(node, root) {
   return false;
 }
 
-function alreadyExpanded(text, end) {
-  return /^\s*\(/.test(text.slice(end));
-}
-
 /**
- * Wrap the first occurrence of each known acronym in a panel subtree.
+ * Wrap every occurrence of a known acronym in a subtree.
+ * Skips code, links, headings, glossary term lists, and key-term runs.
  */
 export function wrapPanelAbbrs(root, branch) {
   if (!root || !index.re) return 0;
-  const seen = new Set();
-  for (const el of root.querySelectorAll("abbr.kc-abbr")) {
-    const k = (el.getAttribute("data-acr") || el.textContent || "").replace(/s$/, "").toUpperCase();
-    if (k) seen.add(k);
-  }
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
@@ -287,12 +547,9 @@ export function wrapPanelAbbrs(root, branch) {
     let changed = false;
     while ((m = index.re.exec(text))) {
       const raw = m[1];
-      const key = raw.toUpperCase();
-      if (seen.has(key)) continue;
-      if (alreadyExpanded(text, m.index + m[0].length)) continue;
+      const key = index.surfaceToKey.get(raw) || canonicalAbbrKey(raw);
       const expand = resolveAbbr(key, branch);
       if (!expand) continue;
-      seen.add(key);
       changed = true;
       pieces.push(document.createTextNode(text.slice(last, m.index)));
       const abbr = document.createElement("abbr");
@@ -337,6 +594,7 @@ function placeTip(anchor, el) {
   const gap = 8;
   tip.style.left = "0px";
   tip.style.top = "0px";
+  tip.textContent = el;
   tip.hidden = false;
   const tw = tip.offsetWidth;
   const th = tip.offsetHeight;
@@ -349,7 +607,6 @@ function placeTip(anchor, el) {
   top = Math.max(margin, Math.min(top, window.innerHeight - th - margin));
   tip.style.left = `${Math.round(left)}px`;
   tip.style.top = `${Math.round(top)}px`;
-  tip.textContent = el;
 }
 
 function showTip(anchor) {
