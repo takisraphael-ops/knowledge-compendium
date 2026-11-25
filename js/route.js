@@ -6,6 +6,9 @@
  *   #/<slug>/<focusId>/             map rooted at a sub-branch
  *   #/<slug>/<focusId>/<nodeId>     sub-branch map, node selected
  *   #<nodeId>                       legacy deep link (still honoured)
+ *   #/glossary                      master A–Z glossary
+ *   #/glossary/<term>               one glossary entry
+ *   #/glossary/<term>/<branch>      that entry, branch sense highlighted
  */
 
 export function resolveRedirect(id, redirects) {
@@ -71,8 +74,15 @@ export function isUnder(index, ancestorId, id) {
   return false;
 }
 
-export function formatHash({ mode, slug, focusId, selectedId, subjectRootId }) {
+export function formatHash({ mode, slug, focusId, selectedId, subjectRootId, glossSlug, glossBranch }) {
   if (mode === "revise") return "#/revise";
+  if (mode === "glossary") {
+    const term = glossSlug ? encodeURIComponent(glossSlug) : "";
+    const br = glossBranch ? encodeURIComponent(glossBranch) : "";
+    if (term && br) return `#/glossary/${term}/${br}`;
+    if (term) return `#/glossary/${term}`;
+    return "#/glossary";
+  }
   if (mode === "overview" || !slug) return "#/";
   const focus = focusId && focusId !== subjectRootId ? focusId : null;
   const sel = selectedId && selectedId !== (focus || subjectRootId) ? selectedId : null;
@@ -110,7 +120,18 @@ export function parseHash(hash, { index, subjects, redirects } = {}) {
   if (!parts.length) return { mode: "overview", slug: null, focusId: null, selectedId: null };
 
   if (parts[0] === "revise") {
-    return { mode: "revise", slug: null, focusId: null, selectedId: null };
+    return { mode: "revise", slug: null, focusId: null, selectedId: null, glossSlug: null, glossBranch: null };
+  }
+
+  if (parts[0] === "glossary") {
+    return {
+      mode: "glossary",
+      slug: null,
+      focusId: null,
+      selectedId: null,
+      glossSlug: parts[1] || null,
+      glossBranch: parts[2] || null,
+    };
   }
 
   const subject = bySlug.get(parts[0]);
@@ -144,5 +165,7 @@ export function parseHash(hash, { index, subjects, redirects } = {}) {
 }
 
 export function sameView(a, b) {
-  return a.mode === b.mode && a.slug === b.slug && a.focusId === b.focusId && a.selectedId === b.selectedId;
+  return a.mode === b.mode && a.slug === b.slug && a.focusId === b.focusId && a.selectedId === b.selectedId
+    && (a.glossSlug || null) === (b.glossSlug || null)
+    && (a.glossBranch || null) === (b.glossBranch || null);
 }
