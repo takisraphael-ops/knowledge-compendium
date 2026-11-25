@@ -68,6 +68,24 @@ export function hideRevise() {
 }
 
 /** Drop in-memory card text (call when locking the vault). */
+export function getReviseSnapshot() {
+  return {
+    view,
+    cursor,
+    revealed,
+    scope: { branchIds: [...(scope.branchIds || [])], sectionIds: [...(scope.sectionIds || [])], domainIds: [...(scope.domainIds || [])], mode: scope.mode },
+  };
+}
+
+export function restoreRevise(snap) {
+  if (!snap) return;
+  if (snap.scope) scope = { ...scope, ...snap.scope };
+  view = snap.view || view;
+  cursor = Number.isFinite(snap.cursor) ? snap.cursor : cursor;
+  revealed = !!snap.revealed;
+  render();
+}
+
 export function clearReviseSession() {
   view = "hub";
   queue = [];

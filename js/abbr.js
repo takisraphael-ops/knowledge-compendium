@@ -487,6 +487,25 @@ export function abbrSkipList() {
  * Resolve an expansion for this branch. If two senses exist here, show both.
  * If this branch has none and other branches disagree, skip (return "").
  */
+export function abbrSenses(acr) {
+  const key = canonicalAbbrKey(acr);
+  return index.byAcr.get(key) || [];
+}
+
+let glossaryOpener = null;
+export function setGlossaryOpener(fn) {
+  glossaryOpener = typeof fn === "function" ? fn : null;
+}
+
+export function glossarySlugFor(key) {
+  return String(key || "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "-")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "term";
+}
+
 export function resolveAbbr(acr, branch) {
   const key = canonicalAbbrKey(acr);
   if (!allowedKey(key)) return "";
@@ -526,6 +545,12 @@ function skipNode(node, root) {
  * Wrap every occurrence of a known acronym in a subtree.
  * Skips code, links, headings, glossary term lists, and key-term runs.
  */
+function glossaryHref(key, branch) {
+  const s = glossarySlugFor(key);
+  const b = String(branch || "").trim();
+  return b ? `#/glossary/${encodeURIComponent(s)}/${encodeURIComponent(b)}` : `#/glossary/${encodeURIComponent(s)}`;
+}
+
 export function wrapPanelAbbrs(root, branch) {
   if (!root || !index.re) return 0;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
@@ -552,12 +577,13 @@ export function wrapPanelAbbrs(root, branch) {
       if (!expand) continue;
       changed = true;
       pieces.push(document.createTextNode(text.slice(last, m.index)));
-      const abbr = document.createElement("abbr");
+      const abbr = document.createElement("a");
       abbr.className = "kc-abbr";
-      abbr.setAttribute("tabindex", "0");
+      abbr.setAttribute("href", glossaryHref(key, branch));
       abbr.setAttribute("data-acr", key);
+      abbr.setAttribute("data-branch", branch || "");
       abbr.setAttribute("data-expand", expand);
-      abbr.setAttribute("aria-label", `${m[0]}, ${expand}`);
+      abbr.setAttribute("aria-label", `${m[0]}, ${expand}. Open in the glossary.`);
       abbr.textContent = m[0];
       pieces.push(abbr);
       last = m.index + m[0].length;
@@ -587,14 +613,31 @@ function tipEl() {
 let tipOwner = null;
 let hideTimer = 0;
 
-function placeTip(anchor, el) {
+function fillTip(anchor, expand) {
+  const tip = tipEl();
+  tip.innerHTML = "";
+  const text = document.createElement("div");
+  text.className = "kc-abbr-tip-text";
+  text.textContent = expand;
+  tip.appendChild(text);
+  const href = anchor.getAttribute("href") || glossaryHref(anchor.getAttribute("data-acr"), anchor.getAttribute("data-branch"));
+  if (href) {
+    const link = document.createElement("a");
+    link.className = "kc-abbr-tip-link";
+    link.href = href;
+    link.textContent = "Glossary →";
+    link.setAttribute("data-act", "glossary-from-tip");
+    tip.appendChild(link);
+  }
+}
+
+function placeTip(anchor) {
   const tip = tipEl();
   const r = anchor.getBoundingClientRect();
   const margin = 12;
   const gap = 8;
   tip.style.left = "0px";
   tip.style.top = "0px";
-  tip.textContent = el;
   tip.hidden = false;
   const tw = tip.offsetWidth;
   const th = tip.offsetHeight;
@@ -609,15 +652,17 @@ function placeTip(anchor, el) {
   tip.style.top = `${Math.round(top)}px`;
 }
 
-function showTip(anchor) {
+function showTip(anchor, { pin = false } = {}) {
   clearTimeout(hideTimer);
   const expand = anchor.getAttribute("data-expand") || "";
   if (!expand) return;
   tipOwner = anchor;
+  if (pin) tipPinned = true;
   const tip = tipEl();
   const id = "kc-abbr-tip";
   anchor.setAttribute("aria-describedby", id);
-  placeTip(anchor, expand);
+  fillTip(anchor, expand);
+  placeTip(anchor);
   tip.hidden = false;
 }
 
@@ -625,14 +670,36 @@ function hideTip() {
   clearTimeout(hideTimer);
   const tip = tipEl();
   tip.hidden = true;
+  tip.innerHTML = "";
   if (tipOwner) tipOwner.removeAttribute("aria-describedby");
   tipOwner = null;
+  tipPinned = false;
+  lastTouchOpen = null;
 }
 
 function hideTipSoon() {
   clearTimeout(hideTimer);
-  hideTimer = setTimeout(hideTip, 120);
+  hideTimer = setTimeout(hideTip, 280);
 }
+
+function closestAbbr(el) {
+  return el?.closest?.("a.kc-abbr, abbr.kc-abbr") || null;
+}
+
+function openGlossaryFrom(anchor) {
+  if (!anchor) return;
+  const payload = {
+    key: anchor.getAttribute("data-acr") || "",
+    branch: anchor.getAttribute("data-branch") || "",
+    href: anchor.getAttribute("href") || "",
+  };
+  if (glossaryOpener) glossaryOpener(payload);
+  else if (payload.href) location.hash = payload.href.replace(/^#/, "#");
+}
+
+let lastPointerType = "mouse";
+let lastTouchOpen = null;
+let tipPinned = false;
 
 /** Bind once. Hover, focus and tap; Escape and scroll close. */
 export function bindAbbrTooltips() {
@@ -640,39 +707,72 @@ export function bindAbbrTooltips() {
   document.documentElement.dataset.kcAbbrBound = "1";
   tipEl();
 
+  document.addEventListener("pointerdown", (e) => {
+    lastPointerType = e.pointerType || "mouse";
+  }, true);
+
   document.addEventListener("pointerover", (e) => {
-    const a = e.target.closest?.("abbr.kc-abbr");
+    if (e.target.closest?.("#kc-abbr-tip")) {
+      clearTimeout(hideTimer);
+      return;
+    }
+    const a = closestAbbr(e.target);
     if (a) showTip(a);
   });
   document.addEventListener("pointerout", (e) => {
-    const a = e.target.closest?.("abbr.kc-abbr");
-    if (!a) return;
     const to = e.relatedTarget;
-    if (to && (a.contains(to) || to === tipEl())) return;
-    hideTipSoon();
+    if (to && (to.closest?.("#kc-abbr-tip") || closestAbbr(to))) return;
+    if (tipPinned) return;
+    if (closestAbbr(e.target) || e.target.closest?.("#kc-abbr-tip")) hideTipSoon();
   });
   document.addEventListener("focusin", (e) => {
-    const a = e.target.closest?.("abbr.kc-abbr");
+    const a = closestAbbr(e.target);
     if (a) showTip(a);
   });
   document.addEventListener("focusout", (e) => {
-    const a = e.target.closest?.("abbr.kc-abbr");
-    if (a && !a.contains(e.relatedTarget)) hideTipSoon();
+    const a = closestAbbr(e.target);
+    if (!a) return;
+    const next = e.relatedTarget;
+    if (next && (a.contains(next) || next.closest?.("#kc-abbr-tip"))) return;
+    hideTipSoon();
   });
   document.addEventListener("click", (e) => {
-    const a = e.target.closest?.("abbr.kc-abbr");
-    if (a) {
+    const tipLink = e.target.closest?.("#kc-abbr-tip a, .kc-abbr-tip-link");
+    if (tipLink) {
       e.preventDefault();
-      showTip(a);
+      const from = tipOwner;
+      hideTip();
+      openGlossaryFrom(from);
+      return;
+    }
+    if (e.target.closest?.("#kc-abbr-tip")) {
+      e.preventDefault();
+      return;
+    }
+    const a = closestAbbr(e.target);
+    if (a) {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button === 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const pointer = e.pointerType || lastPointerType;
+      const isTouch = pointer === "touch" || pointer === "pen";
+      if (isTouch && lastTouchOpen !== a) {
+        showTip(a, { pin: true });
+        lastTouchOpen = a;
+        return;
+      }
+      hideTip();
+      openGlossaryFrom(a);
       return;
     }
     if (tipOwner) hideTip();
-  });
+  }, true);
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && tipOwner) {
       hideTip();
     }
   });
-  window.addEventListener("scroll", () => { if (tipOwner) hideTip(); }, true);
+  window.addEventListener("scroll", () => { if (tipOwner && !tipPinned) hideTip(); }, true);
   window.addEventListener("resize", () => { if (tipOwner) hideTip(); });
 }
+

@@ -36,8 +36,9 @@ import {
   wouldCycle,
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
-import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession } from "./revise.js";
-import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips } from "./abbr.js";
+import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise } from "./revise.js";
+import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips, setGlossaryOpener } from "./abbr.js";
+import { buildGlossary, initGlossary, showGlossary, hideGlossary, isGlossaryVisible, clearGlossarySession, glossaryHash, getGlossaryEntry } from "./glossary.js";
 
 const PALETTE = [
   "#1a73e8",
@@ -86,6 +87,8 @@ const els = {
   lockBtn: $("lock-btn"),
   reviseBtn: $("revise-btn"),
   revise: $("revise"),
+  glossaryBtn: $("glossary-btn"),
+  glossary: $("glossary"),
   viewport: $("viewport"),
   world: $("world"),
   edges: $("edges"),
@@ -178,6 +181,8 @@ function currentRoute() {
     focusId: state.focusId,
     selectedId: state.selected,
     subjectRootId: subject?.rootId || null,
+    glossSlug: state.glossSlug || null,
+    glossBranch: state.glossBranch || null,
   };
 }
 
@@ -186,12 +191,18 @@ function normalizeHash(hash) {
   return hash;
 }
 
-function writeRoute({ push = false } = {}) {
+function writeRoute({ push = false, hist = undefined } = {}) {
   if (routeApplying || !state.index) return;
   const hash = formatHash(currentRoute());
-  if (normalizeHash(location.hash) === normalizeHash(hash)) return;
-  if (push) history.pushState(null, "", hash);
-  else history.replaceState(null, "", hash);
+  const st = hist === undefined
+    ? (push ? null : (history.state && typeof history.state === "object" ? history.state : null))
+    : hist;
+  if (normalizeHash(location.hash) === normalizeHash(hash)) {
+    if (hist !== undefined) history.replaceState(st, "", hash);
+    return;
+  }
+  if (push) history.pushState(st, "", hash);
+  else history.replaceState(st, "", hash);
 }
 
 function buildSubjects() {
@@ -335,6 +346,7 @@ function rebuildDerived() {
   fillDocFilter();
   setTermLinker(state.index ? buildTermLinker(state.index) : null);
   setAbbrIndex(buildAbbrIndex(state.index, { subjects: state.subjects, nodeBranch: state.nodeBranch }));
+  buildGlossary(state.index, { subjects: state.subjects, nodeBranch: state.nodeBranch });
 }
 
 function branchColor(id) {
@@ -585,10 +597,100 @@ function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
 
+function captureReturnState() {
+  const panel = els.panel;
+  const details = panel
+    ? [...panel.querySelectorAll("details")].map((d, i) => ({ i, open: d.open, id: d.id || "" }))
+    : [];
+  const route = currentRoute();
+  const node = state.selected && state.index?.byId.get(state.selected);
+  let title = "Home";
+  if (state.mode === "revise") title = "Revise";
+  else if (state.mode === "glossary") title = "Glossary";
+  else if (node?.title) title = node.title;
+  const snap = {
+    kind: state.mode === "revise" ? "revise" : state.mode === "glossary" ? "glossary" : (state.selected ? "topic" : "home"),
+    route,
+    hash: formatHash(route),
+    title,
+    panelScroll: panel?.scrollTop || 0,
+    depthOpen: !!state.depthOpen,
+    fullNotesOpen: !!state.fullNotesOpen,
+    showOriginal: !!state.showOriginal,
+    details,
+    branch: subjectBySlug(state.slug)?.slug || state.nodeBranch.get(state.selected) || "",
+    selectedId: state.selected,
+  };
+  if (state.mode === "revise") snap.revise = getReviseSnapshot();
+  return snap;
+}
+
+function restorePanelUi(snap) {
+  if (!snap || !els.panel) return;
+  const list = [...els.panel.querySelectorAll("details")];
+  for (const s of snap.details || []) {
+    const d = (s.id && els.panel.querySelector("#" + CSS.escape(s.id))) || list[s.i];
+    if (d) d.open = !!s.open;
+  }
+  requestAnimationFrame(() => {
+    if (els.panel) els.panel.scrollTop = snap.panelScroll || 0;
+  });
+}
+
+function openGlossary({ slug = null, branch = null, push = true } = {}) {
+  if (!state.index) return;
+  const already = state.mode === "glossary";
+  const snap = already ? (history.state?.kcReturn || state.glossaryReturn) : captureReturnState();
+  if (!already) {
+    history.replaceState({ ...(history.state && typeof history.state === "object" ? history.state : {}), kcRestore: snap }, "", location.hash);
+  }
+  if (isReviseVisible()) hideRevise();
+  state.glossaryReturn = snap;
+  state.mode = "glossary";
+  state.glossSlug = slug || null;
+  state.glossBranch = branch || null;
+  const hash = formatHash(currentRoute());
+  const hist = { kcView: "glossary", glossSlug: slug || null, glossBranch: branch || null, kcReturn: snap };
+  if (push) history.pushState(hist, "", hash);
+  else history.replaceState(hist, "", hash);
+  showGlossary({ slug, branch, returnTo: snap && snap.kind !== "glossary" && snap.kind !== "home" ? snap : (snap?.kind === "topic" || snap?.kind === "revise" ? snap : null) });
+  renderNav();
+}
+
+function leaveGlossary() {
+  if (history.state?.kcReturn) {
+    history.back();
+    return;
+  }
+  const snap = state.glossaryReturn;
+  hideGlossary();
+  if (snap?.hash && snap.kind && snap.kind !== "glossary") {
+    routeApplying = true;
+    history.replaceState({ kcRestore: snap }, "", snap.hash);
+    routeApplying = false;
+    applyRoute({ fitMap: false, restore: snap });
+    return;
+  }
+  openOverview({ push: false, fitMap: true });
+}
+
+function openTopicFromGlossary(id) {
+  if (!id || !state.index?.byId.has(id)) return;
+  hideGlossary();
+  state.glossSlug = null;
+  state.glossBranch = null;
+  const subject = subjectOfNode(state.index, state.subjects, id);
+  if (subject) openSubject(subject.slug, { selectedId: id, push: true, fitMap: true });
+  else select(id, { toggle: false, push: true });
+}
+
 function openRevise({ push = true } = {}) {
   if (!state.index) return;
+  if (isGlossaryVisible()) hideGlossary();
   if (state.mode !== "revise") state.reviseReturn = currentRoute();
   state.mode = "revise";
+  state.glossSlug = null;
+  state.glossBranch = null;
   writeRoute({ push });
   showRevise();
   renderNav();
@@ -605,7 +707,7 @@ function leaveRevise() {
   openOverview({ push: false, fitMap: true });
 }
 
-function applyRoute({ fitMap = false } = {}) {
+function applyRoute({ fitMap = false, restore = null } = {}) {
   if (!state.index) return;
   const parsed = parseHash(location.hash, { index: state.index, subjects: state.subjects, redirects: state.redirects });
   const canonical = formatHash({
@@ -614,19 +716,39 @@ function applyRoute({ fitMap = false } = {}) {
     focusId: parsed.focusId,
     selectedId: parsed.selectedId,
     subjectRootId: subjectBySlug(parsed.slug)?.rootId || null,
+    glossSlug: parsed.glossSlug || null,
+    glossBranch: parsed.glossBranch || null,
   });
   if (normalizeHash(location.hash) !== normalizeHash(canonical)) {
     routeApplying = true;
-    history.replaceState(null, "", canonical);
+    history.replaceState(history.state, "", canonical);
     routeApplying = false;
   }
   if (parsed.mode === "revise") {
+    if (isGlossaryVisible()) hideGlossary();
     state.mode = "revise";
+    state.glossSlug = null;
+    state.glossBranch = null;
     showRevise();
+    if (restore?.revise) restoreRevise(restore.revise);
     renderNav();
     return;
   }
+  if (parsed.mode === "glossary") {
+    if (state.mode === "revise" || isReviseVisible()) hideRevise();
+    state.mode = "glossary";
+    state.glossSlug = parsed.glossSlug || null;
+    state.glossBranch = parsed.glossBranch || null;
+    const returnTo = history.state?.kcReturn || state.glossaryReturn || null;
+    const forBtn = returnTo && (returnTo.kind === "topic" || returnTo.kind === "revise") ? returnTo : null;
+    showGlossary({ slug: state.glossSlug, branch: state.glossBranch, returnTo: forBtn });
+    renderNav();
+    return;
+  }
+  if (isGlossaryVisible()) hideGlossary();
   if (state.mode === "revise" || isReviseVisible()) hideRevise();
+  state.glossSlug = null;
+  state.glossBranch = null;
 
   const prevMode = state.mode;
   const prevFocus = state.focusId;
@@ -648,9 +770,15 @@ function applyRoute({ fitMap = false } = {}) {
   }
   state.selected = selected;
   state.editing = false;
-  state.depthOpen = false;
-  state.fullNotesOpen = false;
-  state.showOriginal = false;
+  if (restore?.kind === "topic") {
+    state.depthOpen = !!restore.depthOpen;
+    state.fullNotesOpen = !!restore.fullNotesOpen;
+    state.showOriginal = !!restore.showOriginal;
+  } else {
+    state.depthOpen = false;
+    state.fullNotesOpen = false;
+    state.showOriginal = false;
+  }
   if (state.selected) {
     for (const a of ancestorIds(state.index, state.selected)) state.expanded.add(a);
     els.hint.hidden = true;
@@ -662,18 +790,23 @@ function applyRoute({ fitMap = false } = {}) {
   }
   draw();
   renderPanel();
-  const shouldFit = fitMap || viewChanged;
+  if (restore?.kind === "topic") restorePanelUi(restore);
+  const shouldFit = (fitMap || viewChanged) && restore?.kind !== "topic";
   requestAnimationFrame(() => {
     if (shouldFit) fit();
     if (state.selected) {
       revealBranch(state.selected);
       if (!shouldFit) ensureVisible(state.selected);
     }
+    if (restore?.kind === "topic") restorePanelUi(restore);
   });
 }
 
 function openOverview({ push = true, fitMap = true } = {}) {
   if (isReviseVisible()) hideRevise();
+  if (isGlossaryVisible()) hideGlossary();
+  state.glossSlug = null;
+  state.glossBranch = null;
 
   state.mode = "overview";
   state.slug = null;
@@ -693,6 +826,9 @@ function openOverview({ push = true, fitMap = true } = {}) {
 
 function openSubject(slug, { focusId = null, selectedId = null, push = true, fitMap = true } = {}) {
   if (isReviseVisible()) hideRevise();
+  if (isGlossaryVisible()) hideGlossary();
+  state.glossSlug = null;
+  state.glossBranch = null;
 
   const subject = subjectBySlug(slug);
   if (!subject) {
@@ -812,6 +948,13 @@ function renderNav() {
   if (state.mode === "revise") {
     crumbs[0].current = false;
     crumbs.push({ kind: "revise", label: "Revise", current: true });
+  } else if (state.mode === "glossary") {
+    crumbs[0].current = false;
+    crumbs.push({ kind: "glossary", label: "Glossary", current: !state.glossSlug });
+    if (state.glossSlug) {
+      const entry = getGlossaryEntry(state.glossSlug);
+      crumbs.push({ kind: "glossary-entry", label: entry?.title || state.glossSlug, current: true });
+    }
   } else if (state.mode === "subject" && state.slug) {
     const subject = subjectBySlug(state.slug);
     const subjectRoot = subject?.rootId;
@@ -867,6 +1010,7 @@ function renderNav() {
       btn.type = "button";
       btn.textContent = crumb.label;
       if (crumb.kind === "home") btn.dataset.nav = "home";
+      else if (crumb.kind === "glossary") btn.dataset.nav = "glossary";
       else if (crumb.kind === "subject") {
         btn.dataset.nav = "subject";
         btn.dataset.slug = crumb.slug;
@@ -897,6 +1041,10 @@ function renderNav() {
   }
   document.title = state.mode === "revise"
     ? "Revise · Knowledge Compendium"
+    : state.mode === "glossary"
+    ? (state.glossSlug && getGlossaryEntry(state.glossSlug)
+      ? `${getGlossaryEntry(state.glossSlug).title} · Glossary`
+      : "Glossary · Knowledge Compendium")
     : state.mode === "subject" && subjectBySlug(state.slug)
     ? `${subjectBySlug(state.slug).title} · Knowledge Compendium`
     : (state.index.byId.get(state.index.rootId)?.title || "Knowledge Compendium");
@@ -907,6 +1055,7 @@ function onBreadcrumbClick(e) {
   if (!btn || !els.breadcrumb.contains(btn)) return;
   const nav = btn.dataset.nav;
   if (nav === "home") openOverview({ push: true });
+  else if (nav === "glossary") openGlossary({ push: true });
   else if (nav === "subject") openSubject(btn.dataset.slug, { push: true });
   else if (nav === "focus") openSubject(btn.dataset.slug || state.slug, { focusId: btn.dataset.id, push: true });
   else if (nav === "select") select(btn.dataset.id, { toggle: false, push: true });
@@ -933,6 +1082,7 @@ function onAppLinkClick(e) {
   if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   const link = e.target.closest("a[href]");
   if (!link) return;
+  if (link.classList.contains("kc-abbr") || link.classList.contains("kc-abbr-tip-link")) return;
   if (!sameAppUrl(link.href)) return;
   const url = new URL(link.href, location.href);
   if (!url.hash) return;
@@ -1233,6 +1383,7 @@ function renderPanel() {
         <h1>${escapeHtml(root?.title || "Compendium")}</h1>
         <p>${escapeHtml(root?.summary || "Select a topic on the map.")}</p>
         <p class="muted">${state.index.byId.size} topics. Click a branch to open it. Scroll to zoom, drag to move.</p>
+        <p><button type="button" class="solid" data-act="open-glossary">A–Z glossary</button></p>
       </div>`;
     syncPanelStickyHeight();
     syncPhoneReaderChrome();
@@ -1682,11 +1833,42 @@ function toast(message) {
   }, 3400);
 }
 
+function onGlossaryClick(e) {
+  const back = e.target.closest("[data-act=glossary-back]");
+  if (back) {
+    e.preventDefault();
+    leaveGlossary();
+    return;
+  }
+  const home = e.target.closest("[data-act=glossary-home]");
+  if (home) {
+    e.preventDefault();
+    leaveGlossary();
+    return;
+  }
+  const letter = e.target.closest(".gloss-jump-link");
+  if (letter && els.glossary.contains(letter)) {
+    e.preventDefault();
+    const L = letter.dataset.letter;
+    const list = els.glossary.querySelector(".gloss-list");
+    list?._fillLetter?.(L);
+    const id = L === "#" ? "gloss-letter-num" : "gloss-letter-" + L;
+    els.glossary.querySelector("#" + CSS.escape(id))?.scrollIntoView({ block: "start" });
+    return;
+  }
+  const topic = e.target.closest("[data-act=open-topic]");
+  if (topic && els.glossary.contains(topic)) {
+    e.preventDefault();
+    openTopicFromGlossary(topic.dataset.id);
+  }
+}
+
 function onPanelClick(e) {
   const btn = e.target.closest("[data-act]");
   if (!btn || !els.panel.contains(btn)) return;
   const act = btn.dataset.act;
   if (act === "open") select(btn.dataset.id, { toggle: true });
+  else if (act === "open-glossary") openGlossary({ push: true });
   else if (act === "close-panel") {
     clearSelection({ push: true });
   } else if (act === "toggle-more") {
@@ -1973,10 +2155,24 @@ function wireChrome() {
     leaveRevise,
     toast,
   });
+  initGlossary({
+    els: { glossary: els.glossary, glossaryBtn: els.glossaryBtn },
+  });
+  setGlossaryOpener(({ key, branch }) => {
+    openGlossary({ slug: key ? String(key).toLowerCase().replace(/&/g, "-").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") : null, branch: branch || null, push: true });
+  });
   els.reviseBtn?.addEventListener("click", () => {
     if (state.mode === "revise") leaveRevise();
     else openRevise({ push: true });
   });
+  els.glossaryBtn?.addEventListener("click", () => {
+    if (state.mode === "glossary" && !state.glossSlug) {
+      els.glossary?.querySelector(".gloss-page")?.scrollTo?.(0, 0);
+      return;
+    }
+    openGlossary({ push: true });
+  });
+  els.glossary?.addEventListener("click", onGlossaryClick);
   wirePanelResize();
   els.panel.addEventListener("click", onPanelClick);
   els.panel.addEventListener("click", onAppLinkClick);
@@ -1994,9 +2190,10 @@ function wireChrome() {
   });
   els.breadcrumb?.addEventListener("click", onBreadcrumbClick);
   els.subjectSwitch?.addEventListener("change", onSubjectSwitch);
-  window.addEventListener("popstate", () => {
+  window.addEventListener("popstate", (e) => {
     if (!state.index) return;
-    applyRoute({ fitMap: true });
+    const restore = e.state?.kcRestore || null;
+    applyRoute({ fitMap: !restore, restore });
   });
   els.panel.addEventListener("toggle", (e) => {
     const det = e.target.closest?.("details.full-notes");
@@ -2219,6 +2416,7 @@ async function openCompendium(key) {
 
 function lock() {
   clearReviseSession();
+  clearGlossarySession();
   state.key = null;
   state.baseNodes = [];
   state.sections = {};
