@@ -41,7 +41,7 @@ function sanitizeStringList(v, max = 200) {
 
 export function sanitizeScope(raw) {
   if (!raw || typeof raw !== "object") return null;
-  const mode = raw.mode === "practice" ? "practice" : "flashcards";
+  const mode = raw.mode === "practice" || raw.mode === "keypoints" ? raw.mode : "flashcards";
   return {
     branchIds: sanitizeStringList(raw.branchIds),
     sectionIds: sanitizeStringList(raw.sectionIds),

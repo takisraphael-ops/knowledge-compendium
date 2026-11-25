@@ -92,7 +92,7 @@ function restoreScope() {
       branchIds: [...(saved.branchIds || [])],
       sectionIds: [...(saved.sectionIds || [])],
       domainIds: [...(saved.domainIds || [])],
-      mode: saved.mode === "practice" ? "practice" : "flashcards",
+      mode: saved.mode === "practice" || saved.mode === "keypoints" ? saved.mode : "flashcards",
     };
     // Drop ids that no longer exist
     const known = new Set((st.subjects || []).map((s) => s.rootId));
@@ -211,7 +211,7 @@ function renderHub() {
       <button type="button" class="rev-back" data-act="leave" aria-label="Back to the map">Back</button>
       <div class="rev-top-title">
         <h1>Revise</h1>
-        <p class="rev-kicker">Flashcards and practice questions, reviewed on this device only.</p>
+        <p class="rev-kicker">Flashcards, key points and practice questions, reviewed on this device only.</p>
       </div>
     </div>
     <div class="rev-body">
@@ -230,6 +230,11 @@ function renderHub() {
               <input type="radio" name="rev-mode" data-act="mode" value="flashcards" ${scope.mode === "flashcards" ? "checked" : ""}>
               <strong>Flashcards</strong>
               <span>Key terms and glossary terms. Term on the front, definition on the back.</span>
+            </label>
+            <label class="rev-mode ${scope.mode === "keypoints" ? "on" : ""}">
+              <input type="radio" name="rev-mode" data-act="mode" value="keypoints" ${scope.mode === "keypoints" ? "checked" : ""}>
+              <strong>Key points</strong>
+              <span>The short revision box from each leaf. Topic on the front, the points on the back.</span>
             </label>
             <label class="rev-mode ${scope.mode === "practice" ? "on" : ""}">
               <input type="radio" name="rev-mode" data-act="mode" value="practice" ${scope.mode === "practice" ? "checked" : ""}>
@@ -387,7 +392,7 @@ function renderStudy() {
   if (!card) return renderSummary();
   const total = queue.length;
   const n = cursor + 1;
-  const kind = card.kind === "q" ? "Practice" : "Flashcard";
+  const kind = card.kind === "q" ? "Practice" : card.kind === "k" ? "Key points" : "Flashcard";
   const grade = revealed ? `
     <div class="rev-grades" role="group" aria-label="How well did you know this?">
       <button type="button" class="rev-grade g-again" data-act="grade" data-grade="again"><strong>Again</strong><span>1 · soon</span></button>
@@ -396,7 +401,8 @@ function renderStudy() {
       <button type="button" class="rev-grade g-easy" data-act="grade" data-grade="easy"><strong>Easy</strong><span>4 · later</span></button>
     </div>` : `<button type="button" class="solid rev-reveal" data-act="reveal">Show answer</button>`;
 
-  const back = revealed ? `<div class="rev-face rev-answer"><div class="rev-face-label">Answer</div>${faceHtml(card.back)}</div>` : "";
+  const backLabel = card.kind === "k" ? "Key points" : "Answer";
+  const back = revealed ? `<div class="rev-face rev-answer"><div class="rev-face-label">${backLabel}</div>${faceHtml(card.back)}</div>` : "";
 
   return `<div class="rev-page rev-study">
     <div class="rev-top">
@@ -411,8 +417,8 @@ function renderStudy() {
       <article class="rev-flash">
         <p class="rev-source">${escapeHtml(card.branchTitle || "")} · ${escapeHtml(card.title || "")}</p>
         <div class="rev-face rev-front">
-          <div class="rev-face-label">${card.kind === "t" ? "Term" : "Question"}</div>
-          ${card.kind === "t" ? `<h2 class="rev-term">${escapeHtml(card.front)}</h2>` : faceHtml(card.front)}
+          <div class="rev-face-label">${card.kind === "t" ? "Term" : card.kind === "k" ? "Topic" : "Question"}</div>
+          ${card.kind === "t" || card.kind === "k" ? `<h2 class="rev-term">${escapeHtml(card.front)}</h2>` : faceHtml(card.front)}
         </div>
         ${back}
       </article>
@@ -426,7 +432,7 @@ function renderStudy() {
 function scopeLabel() {
   const st = appState();
   const names = (st.subjects || []).filter((s) => scope.branchIds.includes(s.rootId)).map((s) => s.title);
-  const mode = scope.mode === "practice" ? "Practice" : "Flashcards";
+  const mode = scope.mode === "practice" ? "Practice" : scope.mode === "keypoints" ? "Key points" : "Flashcards";
   if (names.length <= 2) return `${mode} · ${names.join(", ") || "this scope"}`;
   return `${mode} · ${names.length} branches`;
 }
@@ -526,7 +532,7 @@ function onChange(e) {
     persistScope();
     render();
   } else if (t.dataset.act === "mode") {
-    scope.mode = t.value === "practice" ? "practice" : "flashcards";
+    scope.mode = t.value === "practice" || t.value === "keypoints" ? t.value : "flashcards";
     persistScope();
     render();
   } else if (t.id === "rev-import-file") {

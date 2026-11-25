@@ -199,6 +199,16 @@ export function termCardId(nodeId, slug) {
   return `t:${nodeId}:${slug}`;
 }
 
+export function keyPointsCardId(nodeId) {
+  return `k:${nodeId}`;
+}
+
+export function keyPointsOf(node) {
+  return (Array.isArray(node?.keyPoints) ? node.keyPoints : [])
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+}
+
 function topSectionId(index, subjects, nodeId, branchRootId) {
   if (!index || !nodeId) return null;
   const root = branchRootId || subjectOfNode(index, subjects, nodeId)?.rootId;
@@ -250,15 +260,31 @@ export function walkScopedNodes(index, subjects, { branchIds = [], sectionIds = 
 
 /**
  * Build in-memory cards for a scope and mode.
- * mode: "practice" | "flashcards"
+ * mode: "practice" | "flashcards" | "keypoints"
  */
 export function collectCards(index, subjects, scope) {
-  const mode = scope?.mode === "practice" ? "practice" : "flashcards";
+  const mode = scope?.mode === "practice" || scope?.mode === "keypoints" ? scope.mode : "flashcards";
   const cards = [];
   const failures = [];
   for (const row of walkScopedNodes(index, subjects, scope)) {
     const { node, subject, sectionId, domainId } = row;
-    if (mode === "practice") {
+    if (mode === "keypoints") {
+      const points = keyPointsOf(node);
+      if (!points.length) continue;
+      cards.push({
+        id: keyPointsCardId(node.id),
+        kind: "k",
+        nodeId: node.id,
+        branchId: subject.rootId,
+        branchSlug: subject.slug,
+        branchTitle: subject.title,
+        sectionId,
+        domainId,
+        title: node.title,
+        front: node.title,
+        back: points.map((s) => `- ${s}`).join("\n"),
+      });
+    } else if (mode === "practice") {
       const parsed = parsePracticePairs(node.expanded || "");
       if (parsed.hasHeading && !parsed.ok) {
         failures.push({ nodeId: node.id, title: node.title, reason: parsed.reason, mode });
