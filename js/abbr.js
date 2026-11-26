@@ -43,6 +43,7 @@ const OFFICIAL_EXPAND = {
   AH: "Authentication Header",
   TPID: "Tag Protocol Identifier",
   VID: "VLAN Identifier",
+  HTTPS: "Hypertext Transfer Protocol Secure",
 };
 
 /** Token as it appears in a term title (paren or bare). */
@@ -613,6 +614,8 @@ export function resolveAbbr(acr, branch) {
   const rows = index.byAcr.get(key) || [];
   if (!rows.length) return "";
   const favoured = (list) => {
+    const official = list.filter((r) => r.src === "official" && r.prefer);
+    if (official.length) return [...new Set(official.map((r) => r.expand))];
     const preferred = list.filter((r) => r.prefer);
     const pool = preferred.length ? preferred : list;
     return pickBest(key, pool.map((r) => r.expand));
