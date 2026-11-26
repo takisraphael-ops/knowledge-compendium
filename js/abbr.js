@@ -45,6 +45,8 @@ const OFFICIAL_EXPAND = {
   VID: "VLAN Identifier",
   HTTPS: "Hypertext Transfer Protocol Secure",
   CSF: "Cybersecurity Framework",
+  SAML: "Security Assertion Markup Language",
+  "OAuth 2.0": "Open Authorization 2.0",
 };
 
 /** Token as it appears in a term title (paren or bare). */
