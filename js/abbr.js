@@ -47,6 +47,8 @@ const OFFICIAL_EXPAND = {
   CSF: "Cybersecurity Framework",
   SAML: "Security Assertion Markup Language",
   "OAuth 2.0": "Open Authorization 2.0",
+  POST: "Power-On Self-Test",
+  MBR: "Master Boot Record",
 };
 
 /** Token as it appears in a term title (paren or bare). */
