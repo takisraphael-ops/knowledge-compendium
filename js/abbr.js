@@ -41,6 +41,8 @@ const UNIT_OR_PRODUCT = new Set([
 const OFFICIAL_EXPAND = {
   RSA: "Rivest–Shamir–Adleman",
   AH: "Authentication Header",
+  TPID: "Tag Protocol Identifier",
+  VID: "VLAN Identifier",
 };
 
 /** Token as it appears in a term title (paren or bare). */
