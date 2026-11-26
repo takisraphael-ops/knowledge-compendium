@@ -49,6 +49,9 @@ const OFFICIAL_EXPAND = {
   "OAuth 2.0": "Open Authorization 2.0",
   POST: "Power-On Self-Test",
   MBR: "Master Boot Record",
+  SRAM: "Static RAM",
+  DRAM: "Dynamic RAM",
+  RAM: "Random Access Memory",
 };
 
 /** Token as it appears in a term title (paren or bare). */
