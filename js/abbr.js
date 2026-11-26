@@ -44,6 +44,7 @@ const OFFICIAL_EXPAND = {
   TPID: "Tag Protocol Identifier",
   VID: "VLAN Identifier",
   HTTPS: "Hypertext Transfer Protocol Secure",
+  CSF: "Cybersecurity Framework",
 };
 
 /** Token as it appears in a term title (paren or bare). */
@@ -452,8 +453,11 @@ function applyOfficialExpands() {
     // resolveAbbr prefers a branch-local sense, so the official name must
     // be present on each branch that already has a row, not only globally.
     for (const branch of branches) {
-      const already = list.find((r) => normExpand(r.expand) === wanted && (r.branch || "") === branch);
-      if (already) already.prefer = true;
+      // Must be src "official", not only prefer: resolveAbbr consults official
+      // rows first. A harvested prefer with the same wording would otherwise
+      // leave pickBest to choose a competing initialism-like spelling.
+      const official = list.find((r) => r.src === "official" && normExpand(r.expand) === wanted && (r.branch || "") === branch);
+      if (official) official.prefer = true;
       else list.unshift({ expand: wanted, branch, src: "official", prefer: true });
     }
     index.byAcr.set(key, list);
