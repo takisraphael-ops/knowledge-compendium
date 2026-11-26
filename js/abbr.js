@@ -20,7 +20,9 @@ const UNIT_OR_PRODUCT = new Set([
   "BPS", "KBPS", "MBPS", "GBPS", "TBPS",
   "DB", "DBM", "DBI", "DBA", "DBW", "DBUV",
   "RPM", "FPS", "DPI", "PPI", "SPI",
-  "MAH", "AH", "WH", "KWH", "VA", "KVA",
+  "MAH", "WH", "KWH", "VA", "KVA",
+  // Ampere-hour is normally written "Ah". Uppercase "AH" is Authentication
+  // Header; wrapping is case-sensitive so "Ah" / "mAh" stay unwrapped.
   "NM", "MM", "CM", "KM", "KG", "MG",
   "MS", "NS", "PS",
   "SY0", "XK0", "PT0", "PK0", "CS0", "N10", "N10-009",
@@ -38,6 +40,7 @@ const UNIT_OR_PRODUCT = new Set([
  */
 const OFFICIAL_EXPAND = {
   RSA: "Rivest–Shamir–Adleman",
+  AH: "Authentication Header",
 };
 
 /** Token as it appears in a term title (paren or bare). */
@@ -127,7 +130,13 @@ function allowedKey(key) {
 function surfacesFor(key) {
   const set = new Set();
   const extras = index.extraSurfaces?.get(key);
-  if (extras) for (const s of extras) set.add(s);
+  if (extras) {
+    for (const s of extras) {
+      // Ampere-hour is written Ah; only the all-caps Authentication Header surface wraps.
+      if (key === "AH" && s !== "AH") continue;
+      set.add(s);
+    }
+  }
   if (key === "OAUTH") {
     set.add("OAuth"); set.add("OAUTH");
   } else if (key === "OAUTH-2") {
@@ -178,6 +187,8 @@ function surfacesFor(key) {
     set.add("IPsec"); set.add("IPSec"); set.add("IPSEC");
   } else if (key === "NVME") {
     set.add("NVMe"); set.add("NVME");
+  } else if (key === "AH") {
+    set.add("AH");
   } else if (key === "PCIE") {
     set.add("PCIe"); set.add("PCI-E"); set.add("PCIE");
   } else if (key === "802.1X") {
@@ -642,6 +653,15 @@ function glossaryHref(key, branch) {
   return b ? `#/glossary/${encodeURIComponent(s)}/${encodeURIComponent(b)}` : `#/glossary/${encodeURIComponent(s)}`;
 }
 
+/**
+ * Case-sensitive surface gate. Uppercase AH is Authentication Header;
+ * mixed-case Ah (ampere-hour) must not wrap even if a harvest added it.
+ */
+function surfacePermitted(surface, key) {
+  if (key === "AH") return surface === "AH";
+  return true;
+}
+
 export function wrapPanelAbbrs(root, branch, opts = {}) {
   if (!root || !index.re) return 0;
   const skip = new Set((opts.skip || []).filter(Boolean).map((s) => String(s).toLowerCase()));
@@ -667,6 +687,7 @@ export function wrapPanelAbbrs(root, branch, opts = {}) {
       const key = index.surfaceToKey.get(raw) || canonicalAbbrKey(raw);
       const expand = resolveAbbr(key, branch);
       if (!expand) continue;
+      if (!surfacePermitted(raw, key)) continue;
       const forms = [raw, m[0], key, expand];
       if (forms.some((f) => f && skip.has(String(f).toLowerCase()))) continue;
       changed = true;
@@ -780,6 +801,7 @@ function matchAbbrPieces(text, branch, skip) {
     const key = index.surfaceToKey.get(raw) || canonicalAbbrKey(raw);
     const expand = resolveAbbr(key, branch);
     if (!expand) continue;
+    if (!surfacePermitted(raw, key)) continue;
     if (!isDiagramAbbrSurface(m[0], key, expand)) continue;
     // Do not split hyphenated compounds (SYN-SENT, SYN-RECEIVED).
     const prev = m.index > 0 ? text[m.index - 1] : "";
