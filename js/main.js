@@ -140,6 +140,8 @@ const els = {
   themeBtn: $("theme-btn"),
   gistStatus: $("gist-sync-status"),
   lockBtn: $("lock-btn"),
+  utilToggle: $("util-toggle"),
+  utilMenu: $("util-menu"),
   reviseBtn: $("revise-btn"),
   progressFile: $("progress-import-file"),
   revise: $("revise"),
@@ -324,14 +326,14 @@ function measureOf(id) {
   const kids = visibleKids(id);
   const badge = !root && !overviewSubject && kids.length > 0;
   const font = root
-    ? '600 18px "Liberation Serif", Georgia, serif'
-    : '600 14px "Liberation Sans", "Segoe UI", sans-serif';
+    ? '600 18px Newsreader, "Iowan Old Style", Palatino, Georgia, serif'
+    : '600 14px Inter, "Segoe UI", Helvetica, Arial, sans-serif';
   if (!measureCtx) measureCtx = document.createElement("canvas").getContext("2d");
   measureCtx.font = font;
   const textW = measureCtx.measureText(node?.title || "").width;
   if (overviewSubject) {
     const countLabel = topicCountLabel(subjectCountFor(id));
-    measureCtx.font = '600 12px "Liberation Sans", "Segoe UI", sans-serif';
+    measureCtx.font = '600 12px Inter, "Segoe UI", Helvetica, Arial, sans-serif';
     const countW = measureCtx.measureText(countLabel).width;
     return {
       w: Math.round(Math.min(320, Math.max(168, Math.max(textW, countW) + 56))),
@@ -2762,6 +2764,7 @@ function gistWhenLabel(iso) {
 
 function openGistSyncDialog() {
   els.editsMenu.hidden = true;
+  closeUtilMenu();
   const view = ensureGistSync().view();
   openModal(`<h2>Cloud sync</h2>${renderGistSyncSection(view, { heading: false })}<div class="row-actions"><button type="button" data-act="modal-close">Close</button></div>`);
 }
@@ -3568,6 +3571,31 @@ function onInboxClick(e) {
   }
 }
 
+function setUtilMenu(open) {
+  if (!els.utilMenu) return;
+  els.utilMenu.hidden = !open;
+  els.utilToggle?.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function closeUtilMenu() {
+  setUtilMenu(false);
+}
+
+function paintSearchHint() {
+  const chord = $("search-kbd-chord");
+  if (!chord) return;
+  const platform = navigator.platform || "";
+  const ua = navigator.userAgent || "";
+  const apple = /Mac|iPhone|iPad|iPod/.test(platform) || /Mac OS/.test(ua);
+  chord.textContent = apple ? "⌘K" : "Ctrl K";
+}
+
+function relayoutForFonts() {
+  if (!state.index || !state.key) return;
+  draw();
+  if (!state.userMoved) fit();
+}
+
 function wireChrome() {
   bindAbbrTooltips();
   ensureGistSync();
@@ -3769,6 +3797,7 @@ function wireChrome() {
       <button type="button" id="open-gist-sync">Cloud sync…</button>
       <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file. Personal notes and quick captures are included.</p>`;
     els.editsMenu.hidden = !els.editsMenu.hidden;
+    if (!els.editsMenu.hidden) closeUtilMenu();
     $("export-edits").onclick = exportEdits;
     $("import-edits").onclick = openImport;
     $("discard-edits").onclick = discardEdits;
@@ -3794,7 +3823,15 @@ function wireChrome() {
     onGistAction(btn);
   });
   document.addEventListener("change", onGistChange);
+  els.utilToggle?.addEventListener("click", () => {
+    const open = Boolean(els.utilMenu?.hidden);
+    setUtilMenu(open);
+    if (open) els.editsMenu.hidden = true;
+  });
   document.addEventListener("click", (e) => {
+    if (els.utilMenu && !els.utilMenu.hidden && !e.target.closest("#util-menu, #util-toggle")) {
+      closeUtilMenu();
+    }
     if (!els.editsMenu.hidden && !e.target.closest("#edits-menu") && e.target !== els.editsBtn) {
       els.editsMenu.hidden = true;
     }
@@ -3813,7 +3850,10 @@ function wireChrome() {
         return;
       }
       if (!els.modal.hidden) closeModal();
-      else if (state.editing) {
+      else if (els.utilMenu && !els.utilMenu.hidden) {
+        closeUtilMenu();
+        els.utilToggle?.focus();
+      } else if (state.editing) {
         state.editing = false;
         renderPanel();
       } else if (state.selected) {
@@ -3979,9 +4019,11 @@ async function openCompendium(key) {
     history.replaceState(null, "", "#/");
   }
   applyRoute({ fitMap: true });
+  if (document.fonts) document.fonts.ready.then(relayoutForFonts);
 }
 
 function lock() {
+  closeUtilMenu();
   flushPersonalNote();
   gistSync?.clearMemoryToken();
   closeInbox({ focus: false });
@@ -4065,6 +4107,7 @@ function applyTheme(mode) {
   if (meta) meta.setAttribute("content", dark ? "#14191f" : "#f3f1ec");
 }
 applyTheme(preferredTheme());
+paintSearchHint();
 els.themeBtn?.addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
   try { localStorage.setItem(THEME_KEY, next); } catch { /* ignore */ }
