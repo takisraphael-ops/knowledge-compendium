@@ -22,7 +22,7 @@ import {
 } from "../js/model.js";
 import { renderNotes, renderKeyTerms, renderKeyPoints } from "../js/notes.js";
 import { parseHash } from "../js/route.js";
-import { domainsForVersion } from "../js/cards.js";
+import { allocateMockQuestions, domainsForVersion } from "../js/cards.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 let failed = 0;
@@ -43,6 +43,57 @@ check("heading bullet table", html.includes("<h3>") && html.includes("<ul>") && 
 check("escapes html", !renderNotes("<script>").includes("<script>"));
 check("code url not autolinked", renderNotes("See `https://api.example.com/v1`").includes("<code>https://api.example.com/v1</code>"));
 check("SY0-801 and SY0-701 domains", domainsForVersion("801")[1].label.includes("Attacks (24%)") && domainsForVersion("701")[1].label.includes("Mitigations (22%)"));
+
+function plenty(domains, n = 1000) {
+  const avail = {};
+  for (const d of domains) avail[d.id] = n;
+  return avail;
+}
+function drawnOf(domains, total, available) {
+  return allocateMockQuestions(domains, total, available).map((row) => row.drawn);
+}
+function weightSum(domains) {
+  return domains.reduce((sum, d) => sum + d.weight, 0);
+}
+const sy801 = domainsForVersion("801");
+const sy701 = domainsForVersion("701");
+const full801 = drawnOf(sy801, 90, plenty(sy801));
+const full701 = drawnOf(sy701, 90, plenty(sy701));
+check("SY0-801 full mock weights", full801.join() === "14,22,17,24,13" && full801.reduce((a, b) => a + b, 0) === 90);
+check("SY0-701 full mock weights", full701.join() === "11,20,16,25,18" && full701.reduce((a, b) => a + b, 0) === 90);
+check("SY0-801 and SY0-701 proportions differ", full801.join() !== full701.join());
+check("quick and half mocks follow each blueprint",
+  drawnOf(sy801, 25, plenty(sy801)).join() === "4,6,5,7,3"
+  && drawnOf(sy701, 25, plenty(sy701)).join() === "3,6,4,7,5"
+  && drawnOf(sy801, 45, plenty(sy801)).join() === "7,11,9,12,6"
+  && drawnOf(sy701, 45, plenty(sy701)).join() === "5,10,8,13,9");
+for (const [label, domains, total, got] of [
+  ["801/90", sy801, 90, full801],
+  ["701/90", sy701, 90, full701],
+  ["801/25", sy801, 25, drawnOf(sy801, 25, plenty(sy801))],
+  ["701/45", sy701, 45, drawnOf(sy701, 45, plenty(sy701))],
+]) {
+  const sum = weightSum(domains);
+  const close = got.every((n, i) => Math.abs(n - Math.round((total * domains[i].weight) / sum)) <= 1);
+  check(`mock share within one seat (${label})`, close);
+}
+const scarce = { "sy0-d1": 100, "sy0-d2": 100, "sy0-d3": 100, "sy0-d4": 2, "sy0-d5": 100 };
+const capped = allocateMockQuestions(sy801, 25, scarce);
+check("mock caps a short domain and redistributes",
+  capped.map((row) => row.drawn).join() === "5,8,6,2,4"
+  && capped.every((row) => row.drawn <= row.available)
+  && capped.reduce((sum, row) => sum + row.drawn, 0) === 25);
+const tiny = plenty(sy801, 2);
+const short = allocateMockQuestions(sy801, 90, tiny);
+check("mock draws only what exists",
+  short.every((row) => row.drawn === 2)
+  && short.reduce((sum, row) => sum + row.drawn, 0) === 10);
+const emptyDomain = { "sy0-d1": 80, "sy0-d2": 0, "sy0-d3": 80, "sy0-d4": 80, "sy0-d5": 80 };
+const skipped = allocateMockQuestions(sy701, 25, emptyDomain);
+check("mock gives nothing to an empty domain",
+  skipped.find((row) => row.id === "sy0-d2").drawn === 0
+  && skipped.every((row) => row.drawn <= row.available)
+  && skipped.reduce((sum, row) => sum + row.drawn, 0) === 25);
 check("malformed legacy hash safe", parseHash("#%E0%A4%A", { index: buildIndex([{ id: "root", title: "Root", parentId: null }]), subjects: [] }).mode === "overview");
 
 const base = [
