@@ -38,6 +38,109 @@ export function domainsForVersion(ver = "801") {
   return (SY0_VERSIONS[ver] || SY0_VERSIONS["801"]).domains;
 }
 
+/** Timed Security+ mock lengths. Question counts follow the domain weights. */
+export const MOCK_EXAMS = [
+  { id: "quick", label: "Quick mock", questions: 25, minutes: 25 },
+  { id: "half", label: "Half mock", questions: 45, minutes: 45 },
+  { id: "full", label: "Full mock", questions: 90, minutes: 90 },
+];
+
+/**
+ * Largest-remainder split of `total` questions across domains by weight.
+ * A domain never receives more items than `availableById` allows. Seats a
+ * domain cannot fill are handed to domains that still have room. The sum of
+ * `drawn` is min(total, the number of items actually available).
+ *
+ * @param {{id: string, weight: number, label?: string}[]} domains
+ * @param {number} total
+ * @param {Record<string, number> | Map<string, number>} availableById
+ */
+export function allocateMockQuestions(domains, total, availableById) {
+  const rows = [];
+  for (const d of domains || []) {
+    if (!d || d.id == null || d.id === "") continue;
+    const weight = Math.max(0, Math.round(Number(d.weight) || 0));
+    let available = 0;
+    if (availableById instanceof Map) available = Number(availableById.get(d.id));
+    else if (availableById && typeof availableById === "object") available = Number(availableById[d.id]);
+    if (!Number.isFinite(available) || available < 0) available = 0;
+    rows.push({
+      id: String(d.id),
+      label: d.label || String(d.id),
+      weight,
+      available: Math.floor(available),
+    });
+  }
+  const pool = rows.reduce((sum, d) => sum + d.available, 0);
+  const target = Math.max(0, Math.min(Math.floor(Number(total) || 0), pool));
+  const drawn = rows.map(() => 0);
+  const room = rows.map((d) => d.available);
+  let remaining = target;
+  let guard = 0;
+  while (remaining > 0 && guard++ < rows.length + 4) {
+    const open = [];
+    for (let i = 0; i < rows.length; i++) {
+      if (room[i] > 0 && rows[i].weight > 0) open.push(i);
+    }
+    if (!open.length) break;
+    const portion = largestRemainder(open.map((i) => rows[i]), remaining);
+    let moved = 0;
+    for (let j = 0; j < open.length; j++) {
+      const i = open[j];
+      const give = Math.min(room[i], portion[j]);
+      if (give <= 0) continue;
+      drawn[i] += give;
+      room[i] -= give;
+      remaining -= give;
+      moved += give;
+    }
+    if (!moved) break;
+  }
+  if (remaining > 0) {
+    const order = rows.map((_, i) => i).sort((a, b) => rows[b].weight - rows[a].weight || a - b);
+    for (const i of order) {
+      if (remaining <= 0) break;
+      const give = Math.min(room[i], remaining);
+      drawn[i] += give;
+      room[i] -= give;
+      remaining -= give;
+    }
+  }
+  return rows.map((d, i) => ({
+    id: d.id,
+    label: d.label,
+    weight: d.weight,
+    available: d.available,
+    drawn: drawn[i],
+  }));
+}
+
+/** Integer largest-remainder (Hamilton) apportionment. */
+function largestRemainder(items, n) {
+  const count = items.length;
+  if (n <= 0 || count === 0) return items.map(() => 0);
+  const weightSum = items.reduce((sum, d) => sum + d.weight, 0);
+  if (weightSum <= 0) {
+    const base = items.map(() => 0);
+    for (let k = 0; k < n; k++) base[k % count] += 1;
+    return base;
+  }
+  const base = items.map((d) => Math.floor((n * d.weight) / weightSum));
+  let left = n - base.reduce((sum, v) => sum + v, 0);
+  const order = items
+    .map((d, i) => ({ i, frac: (n * d.weight) % weightSum, weight: d.weight }))
+    .sort((a, b) => b.frac - a.frac || b.weight - a.weight || a.i - b.i);
+  let guard = 0;
+  while (left > 0 && guard++ < n + 2) {
+    for (const slot of order) {
+      if (left <= 0) break;
+      base[slot.i] += 1;
+      left -= 1;
+    }
+  }
+  return base;
+}
+
 export const SY0_DOMAINS = SY0_VERSIONS["801"].domains;
 
 const DOMAIN_BY_SECTION = new Map();

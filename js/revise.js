@@ -4,7 +4,7 @@
  */
 import { escapeHtml, renderNotes } from "./notes.js";
 import { wrapPanelAbbrs } from "./abbr.js";
-import { collectCards, domainsForVersion, SY0_VERSIONS } from "./cards.js";
+import { allocateMockQuestions, collectCards, domainsForVersion, MOCK_EXAMS, SY0_VERSIONS } from "./cards.js";
 import {
   loadStore,
   saveStore,
@@ -18,6 +18,7 @@ import {
   markIntroduced,
   resetProgress,
   sanitizeScope,
+  isDue,
 } from "./schedule.js";
 import {
   PASS_PCT,
@@ -25,10 +26,12 @@ import {
   historySummary,
   loadMockHistory,
   makeAttemptId,
-  pickMockQuestions,
   saveMockHistory,
   weakestDomain,
 } from "./progress.js";
+
+const EXAM_VER_KEY = "kc-sy0-version-v1";
+const CARD_MODES = ["flashcards", "practice", "keypoints"];
 
 let hooks = null;
 let store = null;
@@ -38,12 +41,10 @@ let queue = [];
 let cursor = 0;
 let revealed = false;
 let session = null;
-let mock = null;
-let mockLength = 25;
-let historyExpanded = false;
 let bound = false;
-
-const MOCK_LENGTHS = [10, 25, 50, 90];
+let mock = null;
+let mockTimer = 0;
+let historyExpanded = false;
 
 export function initRevise(nextHooks) {
   hooks = nextHooks;
@@ -56,11 +57,12 @@ export function initRevise(nextHooks) {
   document.addEventListener("keydown", onKey);
 }
 
-export function showRevise() {
+export function showRevise({ keepScope = false } = {}) {
   if (!hooks) return;
   store = loadStore();
-  restoreScope();
-  if (view !== "study" && view !== "summary" && view !== "mock" && view !== "mock-summary") view = "hub";
+  if (!keepScope) restoreScope();
+  const sticky = view === "study" || view === "summary" || view === "mock" || view === "mock-summary" || view === "mock-review";
+  if (!sticky) view = "hub";
   const el = hooks.els.revise;
   el.hidden = false;
   document.body.classList.add("revise-open");
@@ -71,6 +73,7 @@ export function showRevise() {
 
 export function hideRevise() {
   if (!hooks) return;
+  stopMockTimer();
   if (hooks.els.revise) {
     hooks.els.revise.innerHTML = "";
     hooks.els.revise.hidden = true;
@@ -78,6 +81,7 @@ export function hideRevise() {
   document.body.classList.remove("revise-open");
   hooks.els.reviseBtn?.classList.remove("active");
   hooks.els.reviseBtn?.removeAttribute("aria-current");
+  hooks.onDueChange?.();
 }
 
 /** Drop in-memory card text (call when locking the vault). */
@@ -99,27 +103,26 @@ export function restoreRevise(snap) {
   render();
 }
 
-export function clearReviseSession() {
-  view = "hub";
-  queue = [];
-  session = null;
-  mock = null;
-  revealed = false;
-  cursor = 0;
-  hideRevise();
-}
-
 export function getReviseStore() {
   return store || loadStore();
 }
 
-/** Reload scheduling and mock history after a progress import. */
+export function currentExamVersion() {
+  return readExamVersion();
+}
+
+export function applyImportedExamVersion(ver) {
+  writeExamVersion(ver === "701" ? "701" : "801");
+}
+
+/** Reload scheduling after a progress import and return to the Revise hub. */
 export function reloadReviseFromStorage() {
   store = loadStore();
   if (!hooks || !isReviseVisible()) return;
   restoreScope();
-  view = "hub";
+  stopMockTimer();
   mock = null;
+  view = "hub";
   queue = [];
   session = null;
   revealed = false;
@@ -127,8 +130,65 @@ export function reloadReviseFromStorage() {
   render();
 }
 
+export function clearReviseSession() {
+  stopMockTimer();
+  mock = null;
+  view = "hub";
+  queue = [];
+  session = null;
+  revealed = false;
+  cursor = 0;
+  hideRevise();
+}
+
+/**
+ * Open Revise already filtered to a subject or a branch inside it.
+ * `dueOnly` starts a session of cards that are due across the compendium.
+ */
+export function openReviseForScope({ branchId, sectionId, dueOnly = false } = {}) {
+  if (!hooks) return;
+  store = loadStore();
+  restoreScope();
+  if (branchId) {
+    scope.branchIds = [branchId];
+    scope.sectionIds = sectionId ? [sectionId] : [];
+    scope.domainIds = [];
+    persistScope();
+  }
+  stopMockTimer();
+  mock = null;
+  if (dueOnly) {
+    startDueSession();
+    return;
+  }
+  view = "hub";
+  revealed = false;
+  queue = [];
+  session = null;
+  cursor = 0;
+  render();
+}
+
+/** How many loaded cards are due today, across every branch and card kind. */
+export function getDueCount(now = Date.now()) {
+  if (!hooks?.getState) return 0;
+  const st = hooks.getState();
+  if (!st?.index) return 0;
+  const saved = loadStore();
+  let n = 0;
+  for (const card of everyCard(st)) {
+    if (isDue(saved.cards?.[card.id], now)) n += 1;
+  }
+  return n;
+}
+
 export function isReviseVisible() {
   return Boolean(hooks?.els?.revise) && !hooks.els.revise.hidden;
+}
+
+/** Ask before discarding an in-progress mock. Returns false if the user cancels. */
+export function prepareToLeaveRevise() {
+  return confirmLeaveMock();
 }
 
 function appState() {
@@ -144,7 +204,7 @@ function restoreScope() {
       sectionIds: [...(saved.sectionIds || [])],
       domainIds: [...(saved.domainIds || [])],
       mode: saved.mode === "practice" || saved.mode === "keypoints" ? saved.mode : "flashcards",
-      examVersion: saved.examVersion === "701" ? "701" : "801",
+      examVersion: readExamVersion(),
     };
     // Drop ids that no longer exist
     const known = new Set((st.subjects || []).map((s) => s.rootId));
@@ -155,6 +215,7 @@ function restoreScope() {
     const fallback = current || st.subjects?.find((s) => s.slug === "cybersecurity") || st.subjects?.[0];
     if (fallback) scope.branchIds = [fallback.rootId];
   }
+  scope.examVersion = readExamVersion();
 }
 
 function persistScope() {
@@ -191,17 +252,25 @@ function cyberSelected() {
 function render() {
   const el = hooks.els.revise;
   if (!el || el.hidden) return;
-  if ((view === "mock" || view === "mock-summary") && !mock) view = "hub";
-  if (view === "mock-summary") ensureMockSaved();
+  if (view === "mock" && mock && Date.now() >= mock.endsAt) {
+    finishMock("time");
+    return;
+  }
   if (view === "study") el.innerHTML = renderStudy();
   else if (view === "summary") el.innerHTML = renderSummary();
   else if (view === "mock") el.innerHTML = renderMock();
   else if (view === "mock-summary") el.innerHTML = renderMockSummary();
+  else if (view === "mock-review") el.innerHTML = renderMockReview();
   else el.innerHTML = renderHub();
   if (view === "study") {
     const card = queue[cursor];
     wrapPanelAbbrs(el.querySelector(".rev-study-body") || el, card?.branchSlug || "");
+  } else if (view === "mock" || view === "mock-review") {
+    const item = view === "mock" ? mock?.items?.[mock.cursor] : null;
+    wrapPanelAbbrs(el.querySelector(".rev-study-body") || el, item?.card?.branchSlug || "");
   }
+  if (view === "mock") ensureMockTimer();
+  else stopMockTimer();
 }
 
 function renderHub() {
@@ -278,7 +347,7 @@ function renderHub() {
       <button type="button" class="rev-back" data-act="leave" aria-label="Back to the map">Back</button>
       <div class="rev-top-title">
         <h1>Revise</h1>
-        <p class="rev-kicker">Flashcards, key points, practice questions, and Security+ mocks. Export progress to move it to another device.</p>
+        <p class="rev-kicker">Flashcards, key points and practice questions, reviewed on this device only.</p>
       </div>
     </div>
     <div class="rev-body">
@@ -289,6 +358,7 @@ function renderHub() {
           <div class="rev-checks">${branchBoxes}</div>
         </div>
         ${sectionHtml}
+        ${extraSectionNote()}
         ${domainHtml}
         <div class="rev-fieldset">
           <div class="rev-legend">Mode</div>
@@ -312,6 +382,8 @@ function renderHub() {
         </div>
       </section>
 
+      ${renderMockLauncher(showDomains)}
+
       <section class="rev-card-block rev-session-start">
         <h2>This scope</h2>
         <dl class="rev-stats">
@@ -332,136 +404,19 @@ function renderHub() {
       </section>
 
       ${renderProgressBlocks(st, cards, stats)}
-      ${renderMockSection()}
-      ${renderProgressSync()}
+
+      <section class="rev-card-block" id="rev-progress-sync">
+        <h2>Progress sync</h2>
+        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, and display preferences between devices. Note text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
+        <div class="rev-data-row rev-sync-row">
+          <button type="button" class="tool" data-act="export">Export progress</button>
+          <button type="button" class="tool" data-act="export-plain">Plain JSON</button>
+          <button type="button" class="tool" data-act="import">Import progress</button>
+          <button type="button" class="tool danger" data-act="reset">Reset scheduling</button>
+        </div>
+      </section>
     </div>
   </div>`;
-}
-
-function renderProgressSync() {
-  return `<section class="rev-card-block" id="rev-progress-sync">
-    <h2>Progress sync</h2>
-    <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, and display preferences between devices. Note text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
-    <div class="rev-data-row rev-sync-row">
-      <button type="button" class="tool" data-act="export">Export progress</button>
-      <button type="button" class="tool" data-act="export-plain">Plain JSON</button>
-      <button type="button" class="tool" data-act="import">Import progress</button>
-      <button type="button" class="tool danger" data-act="reset">Reset progress</button>
-    </div>
-  </section>`;
-}
-
-function mockPool() {
-  const st = appState();
-  const cyber = (st.subjects || []).find((s) => s.slug === "cybersecurity");
-  const ver = scope.examVersion === "701" ? "701" : "801";
-  const domains = domainsForVersion(ver);
-  if (!cyber || !st.index) return { cyber: null, cards: [], domains, ver };
-  const { cards } = collectCards(st.index, st.subjects, {
-    branchIds: [cyber.rootId],
-    mode: "practice",
-    sectionIds: [],
-    domainIds: [],
-  });
-  return { cyber, cards, domains, ver };
-}
-
-function renderMockSection() {
-  const { cards, domains, ver } = mockPool();
-  const available = cards.length;
-  const serve = Math.min(mockLength, available);
-  const verBtns = Object.entries(SY0_VERSIONS).map(([k, v]) => `
-    <label class="rev-ver ${ver === k ? "on" : ""}">
-      <input type="radio" name="mock-exam-ver" data-act="exam-ver" value="${k}" ${ver === k ? "checked" : ""}>
-      <span>${escapeHtml(v.code)}</span>
-    </label>`).join("");
-  const lengths = MOCK_LENGTHS.map((n) => `<option value="${n}" ${n === mockLength ? "selected" : ""}>${n}</option>`).join("");
-  const startLabel = serve
-    ? `Start mock · ${serve} question${serve === 1 ? "" : "s"}`
-    : "No practice questions available";
-  return `<section class="rev-card-block" id="rev-mock">
-    <h2>Security+ mock exam</h2>
-    <p class="rev-fine">Practice questions from the Cybersecurity notes, drawn in proportion to the selected exam’s domain weights. After the answer, mark it correct or missed. ${PASS_PCT}% or better counts as a pass here — a study stand-in for 750 out of 900, not an official score.</p>
-    <div class="rev-mock-setup">
-      <div class="rev-ver-switch" role="radiogroup" aria-label="Mock exam version">${verBtns}</div>
-      <label class="rev-new-limit">Length
-        <select data-act="mock-length" aria-label="Mock exam length" ${available ? "" : "disabled"}>${lengths}</select>
-      </label>
-      <button type="button" class="solid rev-start" data-act="start-mock" ${serve ? "" : "disabled"}>${escapeHtml(startLabel)}</button>
-    </div>
-    <p class="rev-fine">${available ? `${available} practice question${available === 1 ? "" : "s"} in this blueprint.` : "Unlock the Cybersecurity branch to sit a mock."} ${domains.length} domains.</p>
-    ${renderMockHistory(ver)}
-  </section>`;
-}
-
-function renderMockHistory(ver) {
-  const summary = historySummary(loadMockHistory(), ver);
-  if (!summary) return "";
-  const code = (SY0_VERSIONS[ver] || SY0_VERSIONS["801"]).code;
-  const shown = historyExpanded ? summary.attempts : summary.attempts.slice(0, 6);
-  const more = summary.attempts.length - shown.length;
-  const weakestNote = summary.weakest
-    ? `<p class="rev-fine">Weakest domain across these ${code} attempts: ${escapeHtml(summary.weakest.label)} (${summary.weakest.pct}%).</p>`
-    : "";
-  const trend = [...summary.attempts].reverse().slice(-8).map((a) => {
-    const cls = a.passed ? "mock-pass" : "mock-fail";
-    return `<span class="mock-trend-score ${cls}">${a.pct}%</span>`;
-  }).join("");
-  return `<div class="mock-history">
-    <h3 class="rev-sub">Mock history</h3>
-    <dl class="rev-stats mock-stats">
-      <div><dt>Latest</dt><dd>${summary.latest.pct}%</dd></div>
-      <div><dt>Best</dt><dd>${summary.best.pct}%</dd></div>
-      <div><dt>Average</dt><dd>${summary.average}%</dd></div>
-      <div><dt>Attempts</dt><dd>${summary.count}</dd></div>
-    </dl>
-    <p class="mock-trend" aria-label="Recent scores, oldest to newest">${trend}</p>
-    ${weakestNote}
-    <div class="rev-data-row">
-      ${summary.weakest ? `<button type="button" class="solid" data-act="drill" data-domain="${escapeHtml(summary.weakest.id)}" data-exam="${ver}">Drill weakest domain</button>` : ""}
-      ${more > 0 ? `<button type="button" class="tool" data-act="history-more">Show all ${summary.count}</button>` : ""}
-      ${historyExpanded && summary.attempts.length > 6 ? `<button type="button" class="tool" data-act="history-less">Show recent</button>` : ""}
-      <button type="button" class="tool danger" data-act="clear-history">Clear history</button>
-    </div>
-    <div class="mock-attempts">${shown.map(renderAttempt).join("")}</div>
-  </div>`;
-}
-
-function renderAttempt(attempt) {
-  const code = (SY0_VERSIONS[attempt.examVersion] || SY0_VERSIONS["801"]).code;
-  const when = formatWhen(attempt.date);
-  const mark = attempt.passed
-    ? `<span class="mock-pill mock-pass">Pass</span>`
-    : `<span class="mock-pill mock-fail">Below pass</span>`;
-  const domains = (attempt.domains || []).map((d) => `<li><span>${escapeHtml(d.label)}</span><span>${d.correct}/${d.total} (${d.pct}%)</span></li>`).join("");
-  return `<details class="mock-attempt">
-    <summary>
-      <span class="mock-when">${escapeHtml(when)}</span>
-      <span class="mock-badge">${escapeHtml(code)}</span>
-      <span class="mock-score">${attempt.correct}/${attempt.total} (${attempt.pct}%)</span>
-      ${mark}
-    </summary>
-    <p class="rev-fine">${formatDuration(attempt.durationSec)} · ${attempt.length} requested</p>
-    ${domains ? `<ul class="mock-domains">${domains}</ul>` : ""}
-  </details>`;
-}
-
-function formatWhen(iso) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso || "");
-  try {
-    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-  } catch {
-    return d.toISOString().slice(0, 16).replace("T", " ");
-  }
-}
-
-function formatDuration(sec) {
-  const s = Math.max(0, Math.round(Number(sec) || 0));
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  if (m <= 0) return `${r}s`;
-  return `${m}m ${String(r).padStart(2, "0")}s`;
 }
 
 function renderProgressBlocks(st, cards, scopeStats) {
@@ -616,6 +571,7 @@ function renderStudy() {
 }
 
 function scopeLabel() {
+  if (session?.dueOnly) return "Due today";
   const st = appState();
   const names = (st.subjects || []).filter((s) => scope.branchIds.includes(s.rootId)).map((s) => s.title);
   const mode = scope.mode === "practice" ? "Practice" : scope.mode === "keypoints" ? "Key points" : "Flashcards";
@@ -654,79 +610,8 @@ function renderSummary() {
         </dl>
         <div class="rev-start-row">
           <button type="button" class="solid" data-act="to-hub">Back to options</button>
-          ${leftover ? `<button type="button" class="tool" data-act="start">Study ${leftover} more due</button>` : ""}
+          ${!session?.dueOnly && leftover ? `<button type="button" class="tool" data-act="start">Study ${leftover} more due</button>` : ""}
         </div>
-      </section>
-    </div>
-  </div>`;
-}
-
-function renderMock() {
-  const card = mock?.questions?.[mock.cursor];
-  if (!card) return renderMockSummary();
-  const total = mock.questions.length;
-  const n = mock.cursor + 1;
-  const code = (SY0_VERSIONS[mock.examVersion] || SY0_VERSIONS["801"]).code;
-  const grade = mock.revealed ? `
-    <div class="rev-grades rev-mock-grades" role="group" aria-label="Did you get this right?">
-      <button type="button" class="rev-grade g-again" data-act="mock-mark" data-correct="0"><strong>Missed</strong><span>count it wrong</span></button>
-      <button type="button" class="rev-grade g-good" data-act="mock-mark" data-correct="1"><strong>Correct</strong><span>count it right</span></button>
-    </div>` : `<button type="button" class="solid rev-reveal" data-act="mock-reveal">Show answer</button>`;
-  const back = mock.revealed ? `<div class="rev-face rev-answer"><div class="rev-face-label">Answer</div>${faceHtml(card.back)}</div>` : "";
-  return `<div class="rev-page rev-study">
-    <div class="rev-top">
-      <button type="button" class="rev-back" data-act="to-hub" aria-label="Leave this mock">Back</button>
-      <div class="rev-top-title">
-        <h1>Security+ mock</h1>
-        <p class="rev-kicker">${n} of ${total} · ${escapeHtml(code)} · ${escapeHtml(card.domainLabel || "Domain")}</p>
-      </div>
-    </div>
-    <div class="rev-progress-bar" aria-hidden="true"><span style="width:${Math.round(((n - 1) / total) * 100)}%"></span></div>
-    <div class="rev-body rev-study-body">
-      <article class="rev-flash">
-        <p class="rev-source">${escapeHtml(card.branchTitle || "")} · ${escapeHtml(card.title || "")}</p>
-        <div class="rev-face rev-front">
-          <div class="rev-face-label">Question</div>
-          ${faceHtml(card.front)}
-        </div>
-        ${back}
-      </article>
-      ${grade}
-      <button type="button" class="rev-open-topic" data-act="open-topic" data-id="${escapeHtml(card.nodeId)}">Open topic</button>
-      <p class="rev-keys">Keyboard: Space shows the answer, then 1 Missed, 2 Correct.</p>
-    </div>
-  </div>`;
-}
-
-function renderMockSummary() {
-  ensureMockSaved();
-  const attempt = mock?.attempt;
-  if (!attempt) {
-    return `<div class="rev-page"><div class="rev-body"><section class="rev-card-block"><p>This mock could not be saved.</p><button type="button" class="solid" data-act="to-hub">Back to options</button></section></div></div>`;
-  }
-  const code = (SY0_VERSIONS[attempt.examVersion] || SY0_VERSIONS["801"]).code;
-  const weak = weakestDomain(attempt.domains);
-  const rows = (attempt.domains || []).map((d) => `<li><span>${escapeHtml(d.label)}</span><span>${d.correct}/${d.total} (${d.pct}%)</span></li>`).join("");
-  const verdict = attempt.passed ? "Pass" : "Below pass";
-  return `<div class="rev-page">
-    <div class="rev-top">
-      <button type="button" class="rev-back" data-act="to-hub" aria-label="Back to revision options">Back</button>
-      <div class="rev-top-title">
-        <h1>Mock summary</h1>
-        <p class="rev-kicker">${escapeHtml(code)} · ${formatDuration(attempt.durationSec)}</p>
-      </div>
-    </div>
-    <div class="rev-body">
-      <section class="rev-card-block">
-        <p class="rev-summary-hero">${attempt.correct}/${attempt.total} <span class="rev-hint">(${attempt.pct}%)</span></p>
-        <p class="mock-verdict ${attempt.passed ? "mock-pass" : "mock-fail"}">${verdict}</p>
-        <p class="rev-disclaimer">Passing this drill means ${PASS_PCT}% or better. That is a study stand-in for 750 out of 900, not an official exam score.</p>
-        ${rows ? `<ul class="mock-domains mock-domains-summary">${rows}</ul>` : ""}
-        <div class="rev-start-row">
-          <button type="button" class="solid" data-act="to-hub">Back to options</button>
-          ${weak ? `<button type="button" class="solid" data-act="drill" data-domain="${escapeHtml(weak.id)}" data-exam="${attempt.examVersion}">Drill weakest domain</button>` : ""}
-        </div>
-        ${weak ? `<p class="rev-fine">Lowest domain on this mock: ${escapeHtml(weak.label)} (${weak.pct}%).</p>` : ""}
       </section>
     </div>
   </div>`;
@@ -737,8 +622,11 @@ function onClick(e) {
   if (!btn || !hooks.els.revise.contains(btn)) return;
   const act = btn.dataset.act;
   if (act === "leave") {
+    if (!confirmLeaveMock()) return;
     hooks.leaveRevise?.();
   } else if (act === "to-hub") {
+    if (!confirmLeaveMock()) return;
+    stopMockTimer();
     view = "hub";
     revealed = false;
     render();
@@ -756,23 +644,43 @@ function onClick(e) {
     hooks.exportStudyProgress?.({ plain: true });
   } else if (act === "import") {
     hooks.promptImportProgress?.();
-  } else if (act === "reset") {
-    doReset();
-  } else if (act === "start-mock") {
-    startMock();
-  } else if (act === "mock-reveal") {
-    revealMock();
-  } else if (act === "mock-mark") {
-    markMock(btn.dataset.correct === "1");
   } else if (act === "drill") {
     startDrill(btn.dataset.domain, btn.dataset.exam);
   } else if (act === "clear-history") {
-    clearHistory();
+    clearMockHistory();
   } else if (act === "history-more") {
     historyExpanded = true;
     render();
   } else if (act === "history-less") {
     historyExpanded = false;
+    render();
+  } else if (act === "reset") {
+    doReset();
+  } else if (act === "mock-start") {
+    startMock(btn.dataset.len);
+  } else if (act === "mock-flag") {
+    toggleMockFlag();
+  } else if (act === "mock-reveal") {
+    revealMock();
+  } else if (act === "mock-grade") {
+    gradeMock(btn.dataset.grade);
+  } else if (act === "mock-prev") {
+    stepMock(-1);
+  } else if (act === "mock-next") {
+    stepMock(1);
+  } else if (act === "mock-end") {
+    finishMock("user");
+  } else if (act === "mock-review") {
+    view = "mock-review";
+    render();
+    hooks.els.revise.scrollTop = 0;
+  } else if (act === "mock-summary") {
+    view = "mock-summary";
+    render();
+    hooks.els.revise.scrollTop = 0;
+  } else if (act === "clear-section") {
+    scope.sectionIds = scope.sectionIds.filter((id) => id !== btn.dataset.id);
+    persistScope();
     render();
   }
 }
@@ -807,16 +715,12 @@ function onChange(e) {
     persistScope();
     render();
   } else if (t.dataset.act === "exam-ver") {
-    scope.examVersion = t.value === "701" ? "701" : "801";
+    writeExamVersion(t.value === "701" ? "701" : "801");
     persistScope();
     render();
   } else if (t.dataset.act === "mode") {
     scope.mode = t.value === "practice" || t.value === "keypoints" ? t.value : "flashcards";
     persistScope();
-    render();
-  } else if (t.dataset.act === "mock-length") {
-    const n = Number(t.value);
-    mockLength = MOCK_LENGTHS.includes(n) ? n : 25;
     render();
   }
 }
@@ -874,7 +778,6 @@ function applyGrade(grade) {
   if (!card) return;
   review(store, card.id, grade);
   saveStore(store);
-  hooks.onStudyDataChanged?.();
   session.done.push({ id: card.id, grade });
   if (grade === "again") {
     const later = queue.slice(cursor + 1).some((c) => c.id === card.id);
@@ -886,6 +789,7 @@ function applyGrade(grade) {
     view = "summary";
     render();
     hooks.els.revise.scrollTop = 0;
+    hooks.onDueChange?.();
     return;
   }
   markCurrentIntroduced();
@@ -894,20 +798,14 @@ function applyGrade(grade) {
 }
 
 function onKey(e) {
-  if (!isReviseVisible() || (view !== "study" && view !== "mock")) return;
+  if (!isReviseVisible()) return;
   const tag = (e.target?.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select" || e.target?.isContentEditable) return;
   if (view === "mock") {
-    if (e.key === " " || e.code === "Space") {
-      e.preventDefault();
-      if (!mock?.revealed) revealMock();
-      return;
-    }
-    if (!mock?.revealed) return;
-    if (e.key === "1") { e.preventDefault(); markMock(false); }
-    else if (e.key === "2") { e.preventDefault(); markMock(true); }
+    onMockKey(e);
     return;
   }
+  if (view !== "study") return;
   if (e.key === " " || e.code === "Space") {
     e.preventDefault();
     if (!revealed) reveal();
@@ -920,126 +818,576 @@ function onKey(e) {
   else if (e.key === "4") { e.preventDefault(); applyGrade("easy"); }
 }
 
-function startMock() {
-  const { cards, domains, ver } = mockPool();
-  const questions = pickMockQuestions(cards, domains, mockLength);
-  if (!questions.length) {
-    hooks.toast?.("No practice questions are available for a Security+ mock yet.");
+function doReset() {
+  const ok = window.confirm("Reset all revision progress on this device? This cannot be undone unless you have an export.");
+  if (!ok) return;
+  resetProgress(store);
+  saveStore(store);
+  view = "hub";
+  session = null;
+  queue = [];
+  render();
+  hooks.onDueChange?.();
+  hooks.toast?.("Revision progress has been cleared.");
+}
+
+function readExamVersion() {
+  try {
+    const v = localStorage.getItem(EXAM_VER_KEY);
+    if (v === "701" || v === "801") return v;
+  } catch { /* ignore */ }
+  return "801";
+}
+
+function writeExamVersion(ver) {
+  scope.examVersion = ver === "701" ? "701" : "801";
+  try { localStorage.setItem(EXAM_VER_KEY, scope.examVersion); } catch { /* ignore */ }
+}
+
+function cyberSubject() {
+  return (appState().subjects || []).find((s) => s.slug === "cybersecurity") || null;
+}
+
+function everyCard(st = appState()) {
+  if (!st?.index) return [];
+  const out = [];
+  for (const mode of CARD_MODES) {
+    const { cards } = collectCards(st.index, st.subjects, {
+      branchIds: [],
+      sectionIds: [],
+      domainIds: [],
+      mode,
+    });
+    out.push(...cards);
+  }
+  return out;
+}
+
+function startDueSession() {
+  store = loadStore();
+  const saved = store;
+  const due = everyCard().filter((card) => isDue(saved.cards?.[card.id]));
+  due.sort((a, b) => {
+    const da = saved.cards[a.id]?.due || 0;
+    const db = saved.cards[b.id]?.due || 0;
+    return da - db || a.id.localeCompare(b.id);
+  });
+  queue = due;
+  cursor = 0;
+  revealed = false;
+  session = { done: [], startedAt: Date.now(), skipped: 0, dueOnly: true };
+  if (!queue.length) {
+    view = "hub";
+    hooks.toast?.("Nothing is due right now.");
+    render();
     return;
   }
+  view = "study";
+  markCurrentIntroduced();
+  render();
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function extraSectionNote() {
+  const known = new Set(sectionOptions().map((s) => s.id));
+  const extras = (scope.sectionIds || []).filter((id) => !known.has(id));
+  if (!extras.length) return "";
+  const st = appState();
+  const chips = extras.map((id) => {
+    const title = st.index?.byId.get(id)?.title || id;
+    return `<button type="button" class="rev-focus-chip" data-act="clear-section" data-id="${escapeHtml(id)}">${escapeHtml(title)} <span aria-hidden="true">×</span></button>`;
+  }).join("");
+  return `<p class="rev-focus">Limited to ${chips}</p>`;
+}
+
+function examVersionControl() {
+  const ver = scope.examVersion === "701" ? "701" : "801";
+  return Object.entries(SY0_VERSIONS).map(([k, v]) => `
+    <label class="rev-ver ${ver === k ? "on" : ""}">
+      <input type="radio" name="rev-exam-ver" data-act="exam-ver" value="${k}" ${ver === k ? "checked" : ""}>
+      <span>${escapeHtml(v.label)}</span>
+    </label>`).join("");
+}
+
+function renderMockLauncher(showDomains) {
+  const cyber = cyberSubject();
+  if (!cyber) return "";
+  const ver = scope.examVersion === "701" ? "701" : "801";
+  const meta = SY0_VERSIONS[ver] || SY0_VERSIONS["801"];
+  const buttons = MOCK_EXAMS.map((exam) => `
+    <button type="button" class="rev-mock-len" data-act="mock-start" data-len="${exam.id}">
+      <strong>${escapeHtml(exam.label)}</strong>
+      <span>${exam.questions} Qs · ${exam.minutes} min</span>
+    </button>`).join("");
+  const versionLine = showDomains
+    ? `<p class="rev-fine">Draws practice questions, then flashcards, in the <strong>${escapeHtml(meta.code)}</strong> domain weights selected above.</p>`
+    : `<div class="rev-legend">Exam version <span class="rev-ver-switch" role="radiogroup" aria-label="Security+ exam version">${examVersionControl()}</span></div>
+       <p class="rev-fine">Questions are drawn in the official <strong>${escapeHtml(meta.code)}</strong> domain weights. Practice questions are used first, then flashcards if a domain runs short.</p>`;
+  return `<section class="rev-card-block rev-mock-launch">
+    <h2>Security+ Mock Exam</h2>
+    ${versionLine}
+    <div class="rev-mock-lengths">${buttons}</div>
+    <p class="rev-fine">A mock stays in this session. It does not change your spaced-repetition schedule. Passing line used here: ${PASS_PCT}% (750 out of 900). Finished attempts are saved on this device.</p>
+    ${renderMockHistory(ver)}
+  </section>`;
+}
+
+function shuffleCopy(list) {
+  const copy = list.slice();
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = copy[i];
+    copy[i] = copy[j];
+    copy[j] = tmp;
+  }
+  return copy;
+}
+
+function startMock(lengthId) {
+  const preset = MOCK_EXAMS.find((exam) => exam.id === lengthId) || MOCK_EXAMS[0];
+  const cyber = cyberSubject();
+  if (!cyber) {
+    hooks.toast?.("Security+ mock exams use the Cybersecurity branch.");
+    return;
+  }
+  const ver = scope.examVersion === "701" ? "701" : "801";
+  const domains = domainsForVersion(ver);
+  const st = appState();
+  const buckets = new Map();
+  for (const domain of domains) {
+    const filter = { branchIds: [cyber.rootId], sectionIds: [], domainIds: [domain.id] };
+    const practice = collectCards(st.index, st.subjects, { ...filter, mode: "practice" }).cards;
+    const terms = collectCards(st.index, st.subjects, { ...filter, mode: "flashcards" }).cards;
+    buckets.set(domain.id, { practice, terms });
+  }
+  const available = {};
+  for (const domain of domains) {
+    const bucket = buckets.get(domain.id);
+    available[domain.id] = bucket.practice.length + bucket.terms.length;
+  }
+  const alloc = allocateMockQuestions(domains, preset.questions, available);
+  const items = [];
+  for (const row of alloc) {
+    const bucket = buckets.get(row.id);
+    const fromPractice = Math.min(bucket.practice.length, row.drawn);
+    const fromTerms = Math.max(0, row.drawn - fromPractice);
+    const chosen = [
+      ...shuffleCopy(bucket.practice).slice(0, fromPractice),
+      ...shuffleCopy(bucket.terms).slice(0, fromTerms),
+    ];
+    for (const card of chosen) {
+      items.push({
+        card,
+        domainId: row.id,
+        domainLabel: row.label,
+        flagged: false,
+        revealed: false,
+        grade: null,
+      });
+    }
+  }
+  if (!items.length) {
+    hooks.toast?.("No practice questions or flashcards are available for this exam version.");
+    return;
+  }
+  const ordered = shuffleCopy(items);
+  const code = (SY0_VERSIONS[ver] || SY0_VERSIONS["801"]).code;
+  const drawn = items.length;
+  const mix = alloc.map((row, i) => `${i + 1}:${row.drawn}`).join(" · ");
+  const note = (drawn < preset.questions
+    ? `Drew ${drawn} of ${preset.questions} — only ${drawn} practice and flashcard items were available.`
+    : `Drew ${drawn} questions to the ${code} domain weights.`) + ` By domain: ${mix}.`;
   mock = {
-    id: makeAttemptId(),
-    questions,
+    lengthId: preset.id,
+    label: preset.label,
+    minutes: preset.minutes,
+    requested: preset.questions,
+    version: ver,
+    code,
+    note,
+    alloc,
+    endsAt: Date.now() + preset.minutes * 60 * 1000,
+    items: ordered,
     cursor: 0,
-    revealed: false,
-    marks: [],
+    endedBecause: null,
+    historyId: makeAttemptId(),
     startedAt: Date.now(),
     finishedAt: 0,
-    examVersion: ver,
-    length: mockLength,
     saved: false,
-    attempt: null,
   };
   view = "mock";
   render();
-  hooks.els.revise.scrollTop = 0;
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function formatClock(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function stopMockTimer() {
+  if (mockTimer) {
+    clearInterval(mockTimer);
+    mockTimer = 0;
+  }
+}
+
+function ensureMockTimer() {
+  if (mockTimer || view !== "mock" || !mock) return;
+  mockTimer = setInterval(tickMockClock, 250);
+}
+
+function tickMockClock() {
+  if (view !== "mock" || !mock) {
+    stopMockTimer();
+    return;
+  }
+  const left = mock.endsAt - Date.now();
+  const el = hooks?.els?.revise?.querySelector("[data-mock-clock]");
+  if (el) {
+    el.textContent = formatClock(left);
+    el.classList.toggle("is-low", left <= 60 * 1000);
+  }
+  if (left <= 0) finishMock("time");
+}
+
+function mockItem() {
+  return mock?.items?.[mock.cursor] || null;
+}
+
+function renderMock() {
+  const item = mockItem();
+  if (!mock || !item) return renderMockSummary();
+  const total = mock.items.length;
+  const n = mock.cursor + 1;
+  const card = item.card;
+  const flagged = mock.items.filter((row) => row.flagged).length;
+  const backLabel = card.kind === "k" ? "Key points" : "Answer";
+  const back = item.revealed
+    ? `<div class="rev-face rev-answer"><div class="rev-face-label">${backLabel}</div>${faceHtml(card.back)}</div>`
+    : "";
+  const grades = item.revealed
+    ? `<div class="rev-mock-grades" role="group" aria-label="Grade this question">
+        <button type="button" class="rev-mock-grade got${item.grade === "got" ? " on" : ""}" data-act="mock-grade" data-grade="got">Got it</button>
+        <button type="button" class="rev-mock-grade missed${item.grade === "missed" ? " on" : ""}" data-act="mock-grade" data-grade="missed">Missed it</button>
+      </div>`
+    : `<button type="button" class="solid rev-reveal" data-act="mock-reveal">Show answer</button>`;
+  const front = card.kind === "t" || card.kind === "k"
+    ? `<h2 class="rev-term">${escapeHtml(card.front)}</h2>`
+    : faceHtml(card.front);
+  const faceLabel = card.kind === "t" ? "Term" : card.kind === "k" ? "Topic" : "Question";
+  return `<div class="rev-page rev-study">
+    <div class="rev-top">
+      <button type="button" class="rev-back" data-act="to-hub">Back</button>
+      <div class="rev-top-title">
+        <h1>${escapeHtml(mock.code)} mock</h1>
+        <p class="rev-kicker">${escapeHtml(mock.label)} · Q ${n} / ${total}</p>
+      </div>
+      <div class="rev-mock-clock" data-mock-clock role="timer" aria-live="off">${formatClock(mock.endsAt - Date.now())}</div>
+    </div>
+    <div class="rev-progress-bar" aria-hidden="true"><span style="width:${Math.round(((n - 1) / total) * 100)}%"></span></div>
+    <p class="rev-fine">${escapeHtml(mock.note)}</p>
+    <div class="rev-body rev-study-body">
+      <article class="rev-flash">
+        <p class="rev-source">${escapeHtml(item.domainLabel)} · ${escapeHtml(card.title || "")}</p>
+        <div class="rev-face rev-front">
+          <div class="rev-face-label">${faceLabel}</div>
+          ${front}
+        </div>
+        ${back}
+      </article>
+      <div class="rev-mock-tools">
+        <button type="button" class="rev-flag${item.flagged ? " on" : ""}" data-act="mock-flag" aria-pressed="${item.flagged ? "true" : "false"}">${item.flagged ? "★ Flagged" : "☆ Flag for review"}</button>
+        <span class="rev-fine">${flagged ? `${flagged} flagged` : ""}</span>
+      </div>
+      ${grades}
+      <div class="rev-mock-nav">
+        <button type="button" class="tool" data-act="mock-prev" ${mock.cursor === 0 ? "disabled" : ""}>Previous</button>
+        <button type="button" class="tool" data-act="mock-next" ${mock.cursor >= total - 1 ? "disabled" : ""}>Next</button>
+        <button type="button" class="solid" data-act="mock-end">Finish mock</button>
+      </div>
+      <p class="rev-keys">Space shows the answer. G got it, M missed it, F flags. Arrows move between questions.</p>
+    </div>
+  </div>`;
+}
+
+function mockScore() {
+  const items = mock?.items || [];
+  const total = items.length;
+  const got = items.filter((item) => item.grade === "got").length;
+  const missed = items.filter((item) => item.grade === "missed").length;
+  const unanswered = items.filter((item) => !item.grade).length;
+  const flagged = items.filter((item) => item.flagged).length;
+  const pct = total ? Math.round((100 * got) / total) : 0;
+  return { total, got, missed, unanswered, flagged, pct, passed: pct >= 83 };
+}
+
+function renderMockSummary() {
+  if (!mock) return renderHub();
+  ensureMockSaved();
+  const score = mockScore();
+  const weak = weakestDomain(mockDomainStats());
+  const verdict = score.total
+    ? (score.passed
+      ? `${score.pct}% is at or above the 83% line (750 out of 900).`
+      : `${score.pct}% is below the 83% line (750 out of 900).`)
+    : "No questions were in this mock.";
+  const timeBits = [];
+  if (mock.endedBecause === "time") timeBits.push("Time ran out.");
+  if (score.unanswered) timeBits.push("Unanswered questions count as missed.");
+  const timeNote = timeBits.length ? ` ${timeBits.join(" ")}` : "";
+  const rows = (mock.alloc || []).map((row) => {
+    const group = mock.items.filter((item) => item.domainId === row.id);
+    const correct = group.filter((item) => item.grade === "got").length;
+    const n = group.length;
+    const pct = n ? `${Math.round((100 * correct) / n)}%` : "—";
+    return `<tr>
+      <th scope="row">${escapeHtml(row.label)}</th>
+      <td>${correct}</td>
+      <td>${n}</td>
+      <td>${pct}</td>
+    </tr>`;
+  }).join("");
+  const reviewN = score.missed + score.unanswered;
+  return `<div class="rev-page">
+    <div class="rev-top">
+      <button type="button" class="rev-back" data-act="to-hub">Back</button>
+      <div class="rev-top-title">
+        <h1>Mock summary</h1>
+        <p class="rev-kicker">${escapeHtml(mock.code)} · ${escapeHtml(mock.label)}</p>
+      </div>
+    </div>
+    <div class="rev-body">
+      <section class="rev-card-block">
+        <p class="rev-summary-hero ${score.passed ? "rev-pass" : "rev-fail"}">${score.pct}%</p>
+        <p class="rev-assess">${score.passed ? "Estimated pass." : "Not at the passing line yet."} ${escapeHtml(verdict)}</p>
+        <p class="rev-disclaimer">This is a self-check on the questions in this mock, not an official CompTIA score. Security+ is scored from 100 to 900, and 750 is the published passing score, about 83%.${escapeHtml(timeNote)}</p>
+        <p class="rev-fine">${escapeHtml(mock.note)}</p>
+        <dl class="rev-stats">
+          <div><dt>Correct</dt><dd>${score.got}</dd></div>
+          <div><dt>Missed</dt><dd>${score.missed}</dd></div>
+          <div><dt>Unanswered</dt><dd>${score.unanswered}</dd></div>
+          <div><dt>Flagged</dt><dd>${score.flagged}</dd></div>
+        </dl>
+        <h3 class="rev-sub">By domain</h3>
+        <div class="rev-table-wrap">
+          <table class="rev-table">
+            <thead>
+              <tr><th>Domain</th><th>Correct</th><th>Questions</th><th>Score</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div class="rev-start-row">
+          <button type="button" class="solid" data-act="to-hub">Back to options</button>
+          ${weak ? `<button type="button" class="solid" data-act="drill" data-domain="${escapeHtml(weak.id)}" data-exam="${mock.version === "701" ? "701" : "801"}">Drill weakest domain</button>` : ""}
+          <button type="button" class="tool" data-act="mock-review" ${reviewN ? "" : "disabled"}>Review missed${reviewN ? ` (${reviewN})` : ""}</button>
+        </div>
+        ${weak ? `<p class="rev-fine">Lowest domain on this mock: ${escapeHtml(weak.label)} (${weak.pct}%).</p>` : ""}
+      </section>
+    </div>
+  </div>`;
+}
+
+function renderMockReview() {
+  if (!mock) return renderHub();
+  const missed = mock.items.filter((item) => item.grade !== "got");
+  const blocks = missed.map((item) => {
+    const card = item.card;
+    const status = item.grade === "missed" ? "Missed" : "Unanswered";
+    const front = card.kind === "t" || card.kind === "k"
+      ? `<h2 class="rev-term">${escapeHtml(card.front)}</h2>`
+      : faceHtml(card.front);
+    return `<article class="rev-flash rev-mock-miss">
+      <p class="rev-source">${escapeHtml(status)} · ${escapeHtml(item.domainLabel)} · ${escapeHtml(card.title || "")}</p>
+      ${front}
+      <div class="rev-face rev-answer"><div class="rev-face-label">Answer</div>${faceHtml(card.back)}</div>
+      <button type="button" class="rev-open-topic" data-act="open-topic" data-id="${escapeHtml(card.nodeId)}">Open topic</button>
+    </article>`;
+  }).join("");
+  return `<div class="rev-page">
+    <div class="rev-top">
+      <button type="button" class="rev-back" data-act="mock-summary">Summary</button>
+      <div class="rev-top-title">
+        <h1>Missed items</h1>
+        <p class="rev-kicker">${missed.length} question${missed.length === 1 ? "" : "s"} to look through again</p>
+      </div>
+    </div>
+    <div class="rev-body rev-study-body">
+      ${blocks || `<p class="rev-fine">Nothing missed.</p>`}
+      <div class="rev-start-row">
+        <button type="button" class="solid" data-act="mock-summary">Back to summary</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function revealMock() {
-  if (view !== "mock" || !mock || mock.revealed) return;
-  mock.revealed = true;
+  const item = mockItem();
+  if (!item || item.revealed) return;
+  item.revealed = true;
   render();
 }
 
-function markMock(correct) {
-  if (view !== "mock" || !mock?.revealed) return;
-  const card = mock.questions[mock.cursor];
-  if (!card) return;
-  mock.marks.push({
-    id: card.id,
-    domainId: card.domainId,
-    domainLabel: card.domainLabel || "",
-    correct: Boolean(correct),
-  });
-  mock.cursor += 1;
-  mock.revealed = false;
-  if (mock.cursor >= mock.questions.length) {
-    finishMock();
-    return;
-  }
+function gradeMock(grade) {
+  const item = mockItem();
+  if (!item || !item.revealed) return;
+  if (grade !== "got" && grade !== "missed") return;
+  item.grade = grade;
   render();
-  hooks.els.revise.scrollTop = 0;
 }
 
-function finishMock() {
-  if (!mock) return;
+function toggleMockFlag() {
+  const item = mockItem();
+  if (!item) return;
+  item.flagged = !item.flagged;
+  render();
+}
+
+function stepMock(dir) {
+  if (!mock?.items?.length) return;
+  const next = mock.cursor + dir;
+  if (next < 0 || next >= mock.items.length) return;
+  mock.cursor = next;
+  render();
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function finishMock(reason) {
+  if (!mock || view === "mock-summary" || view === "mock-review") return;
+  stopMockTimer();
+  mock.endedBecause = reason === "time" ? "time" : "user";
   if (!mock.finishedAt) mock.finishedAt = Date.now();
   view = "mock-summary";
   render();
-  hooks.els.revise.scrollTop = 0;
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function mockDomainStats() {
+  return (mock?.alloc || []).map((row) => {
+    const group = (mock.items || []).filter((item) => item.domainId === row.id);
+    const correct = group.filter((item) => item.grade === "got").length;
+    const total = group.length;
+    return {
+      id: row.id,
+      label: row.label,
+      correct,
+      total,
+      pct: total ? Math.round((100 * correct) / total) : 0,
+    };
+  }).filter((row) => row.total > 0);
 }
 
 function ensureMockSaved() {
   if (!mock || mock.saved) return;
   if (!mock.finishedAt) mock.finishedAt = Date.now();
-  const attempt = buildAttemptFromMock(mock);
-  if (!attempt) return;
-  let next;
+  const score = mockScore();
+  const attempt = {
+    id: mock.historyId || makeAttemptId(),
+    date: new Date(mock.finishedAt).toISOString(),
+    examVersion: mock.version === "701" ? "701" : "801",
+    length: mock.requested || score.total,
+    total: score.total,
+    correct: score.got,
+    pct: score.pct,
+    passed: score.pct >= PASS_PCT,
+    durationSec: Math.max(0, Math.round((mock.finishedAt - (mock.startedAt || mock.finishedAt)) / 1000)),
+    domains: mockDomainStats(),
+  };
+  if (!attempt.total) {
+    mock.saved = true;
+    return;
+  }
   try {
-    next = appendMockAttempt(loadMockHistory(), attempt);
-    saveMockHistory(next);
+    saveMockHistory(appendMockAttempt(loadMockHistory(), attempt));
   } catch {
     return;
   }
-  mock.attempt = attempt;
   mock.saved = true;
   hooks.onStudyDataChanged?.();
 }
 
-function buildAttemptFromMock(sessionMock) {
-  const ver = sessionMock.examVersion === "701" ? "701" : "801";
-  const labels = new Map(domainsForVersion(ver).map((d) => [d.id, d.label]));
-  for (const mark of sessionMock.marks || []) {
-    if (mark.domainId && mark.domainLabel) labels.set(mark.domainId, mark.domainLabel);
+function renderMockHistory(ver) {
+  const summary = historySummary(loadMockHistory(), ver);
+  if (!summary) return "";
+  const code = (SY0_VERSIONS[ver] || SY0_VERSIONS["801"]).code;
+  const shown = historyExpanded ? summary.attempts : summary.attempts.slice(0, 6);
+  const more = summary.attempts.length - shown.length;
+  const weakestNote = summary.weakest
+    ? `<p class="rev-fine">Weakest domain across these ${escapeHtml(code)} attempts: ${escapeHtml(summary.weakest.label)} (${summary.weakest.pct}%).</p>`
+    : "";
+  const trend = [...summary.attempts].reverse().slice(-8).map((attempt) => {
+    const cls = attempt.passed ? "mock-pass" : "mock-fail";
+    return `<span class="mock-trend-score ${cls}">${attempt.pct}%</span>`;
+  }).join("");
+  return `<div class="mock-history">
+    <h3 class="rev-sub">Mock history</h3>
+    <dl class="rev-stats mock-stats">
+      <div><dt>Latest</dt><dd>${summary.latest.pct}%</dd></div>
+      <div><dt>Best</dt><dd>${summary.best.pct}%</dd></div>
+      <div><dt>Average</dt><dd>${summary.average}%</dd></div>
+      <div><dt>Attempts</dt><dd>${summary.count}</dd></div>
+    </dl>
+    <p class="mock-trend" aria-label="Recent scores, oldest to newest">${trend}</p>
+    ${weakestNote}
+    <div class="rev-data-row">
+      ${summary.weakest ? `<button type="button" class="solid" data-act="drill" data-domain="${escapeHtml(summary.weakest.id)}" data-exam="${ver}">Drill weakest domain</button>` : ""}
+      ${more > 0 ? `<button type="button" class="tool" data-act="history-more">Show all ${summary.count}</button>` : ""}
+      ${historyExpanded && summary.attempts.length > 6 ? `<button type="button" class="tool" data-act="history-less">Show recent</button>` : ""}
+      <button type="button" class="tool danger" data-act="clear-history">Clear history</button>
+    </div>
+    <div class="mock-attempts">${shown.map(renderMockAttempt).join("")}</div>
+  </div>`;
+}
+
+function renderMockAttempt(attempt) {
+  const code = (SY0_VERSIONS[attempt.examVersion] || SY0_VERSIONS["801"]).code;
+  const mark = attempt.passed
+    ? `<span class="mock-pill mock-pass">Pass</span>`
+    : `<span class="mock-pill mock-fail">Below pass</span>`;
+  const domains = (attempt.domains || []).map((d) => `<li><span>${escapeHtml(d.label)}</span><span>${d.correct}/${d.total} (${d.pct}%)</span></li>`).join("");
+  return `<details class="mock-attempt">
+    <summary>
+      <span class="mock-when">${escapeHtml(formatWhen(attempt.date))}</span>
+      <span class="mock-badge">${escapeHtml(code)}</span>
+      <span class="mock-score">${attempt.correct}/${attempt.total} (${attempt.pct}%)</span>
+      ${mark}
+    </summary>
+    <p class="rev-fine">${formatDuration(attempt.durationSec)} · ${attempt.length} requested</p>
+    ${domains ? `<ul class="mock-domains">${domains}</ul>` : ""}
+  </details>`;
+}
+
+function formatWhen(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso || "");
+  try {
+    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return d.toISOString().slice(0, 16).replace("T", " ");
   }
-  const byId = new Map();
-  let correct = 0;
-  for (const mark of sessionMock.marks || []) {
-    if (mark.correct) correct += 1;
-    const id = mark.domainId;
-    if (!id) continue;
-    const row = byId.get(id) || { id, label: labels.get(id) || id, correct: 0, total: 0 };
-    row.total += 1;
-    if (mark.correct) row.correct += 1;
-    if (labels.get(id)) row.label = labels.get(id);
-    byId.set(id, row);
-  }
-  const domains = [...byId.values()].map((d) => ({
-    ...d,
-    pct: d.total ? Math.round((100 * d.correct) / d.total) : 0,
-  }));
-  const total = sessionMock.marks.length;
-  const pct = total ? Math.round((100 * correct) / total) : 0;
-  return {
-    id: sessionMock.id,
-    date: new Date(sessionMock.finishedAt || Date.now()).toISOString(),
-    examVersion: ver,
-    length: sessionMock.length || total,
-    total,
-    correct,
-    pct,
-    passed: pct >= PASS_PCT,
-    durationSec: Math.max(0, Math.round(((sessionMock.finishedAt || Date.now()) - sessionMock.startedAt) / 1000)),
-    domains,
-  };
+}
+
+function formatDuration(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m <= 0) return `${r}s`;
+  return `${m}m ${String(r).padStart(2, "0")}s`;
 }
 
 function startDrill(domainId, examVersion) {
   const id = String(domainId || "");
   if (!id) return;
-  const st = appState();
-  const cyber = (st.subjects || []).find((s) => s.slug === "cybersecurity");
-  scope.examVersion = examVersion === "701" ? "701" : "801";
+  if (view === "mock") {
+    if (!confirmLeaveMock()) return;
+  }
+  stopMockTimer();
+  mock = null;
+  if (examVersion) writeExamVersion(examVersion);
+  const cyber = cyberSubject();
   scope.mode = "practice";
   scope.sectionIds = [];
   scope.domainIds = [id];
@@ -1048,16 +1396,7 @@ function startDrill(domainId, examVersion) {
   store = loadStore();
   const { cards } = currentCatalog();
   let next = buildQueue(store, cards);
-  if (!next.length) {
-    next = cards.slice();
-    for (let i = next.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const swap = next[i];
-      next[i] = next[j];
-      next[j] = swap;
-    }
-    next = next.slice(0, 20);
-  }
+  if (!next.length) next = shuffleCopy(cards).slice(0, 20);
   if (!next.length) {
     view = "hub";
     hooks.toast?.("No practice questions in that domain yet.");
@@ -1071,10 +1410,10 @@ function startDrill(domainId, examVersion) {
   view = "study";
   markCurrentIntroduced();
   render();
-  hooks.els.revise.scrollTop = 0;
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
 }
 
-function clearHistory() {
+function clearMockHistory() {
   const ok = window.confirm("Clear all mock exam history on this device? This cannot be undone.");
   if (!ok) return;
   saveMockHistory([]);
@@ -1085,15 +1424,45 @@ function clearHistory() {
   hooks.toast?.("Mock exam history cleared.");
 }
 
-function doReset() {
-  const ok = window.confirm("Reset all revision progress on this device? This cannot be undone unless you have an export.");
-  if (!ok) return;
-  resetProgress(store);
-  saveStore(store);
-  hooks.onStudyDataChanged?.();
+function confirmLeaveMock() {
+  if (view !== "mock" || !mock) return true;
+  const ok = window.confirm("Leave this mock exam? Answers in this session will be discarded.");
+  if (!ok) return false;
+  stopMockTimer();
+  mock = null;
   view = "hub";
-  session = null;
-  queue = [];
-  render();
-  hooks.toast?.("Revision progress has been cleared.");
+  return true;
+}
+
+function onMockKey(e) {
+  if (e.key === " " || e.code === "Space") {
+    e.preventDefault();
+    const item = mockItem();
+    if (item && !item.revealed) revealMock();
+    return;
+  }
+  if (e.key === "f" || e.key === "F") {
+    e.preventDefault();
+    toggleMockFlag();
+    return;
+  }
+  if (e.key === "ArrowRight") {
+    e.preventDefault();
+    stepMock(1);
+    return;
+  }
+  if (e.key === "ArrowLeft") {
+    e.preventDefault();
+    stepMock(-1);
+    return;
+  }
+  const item = mockItem();
+  if (!item?.revealed) return;
+  if (e.key === "g" || e.key === "G") {
+    e.preventDefault();
+    gradeMock("got");
+  } else if (e.key === "m" || e.key === "M") {
+    e.preventDefault();
+    gradeMock("missed");
+  }
 }

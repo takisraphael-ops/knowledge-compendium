@@ -479,10 +479,11 @@ export function readPrefs(storage, srs) {
   });
 }
 
-export function collectProgress(storage, { srs, theme } = {}) {
+export function collectProgress(storage, { srs, theme, examVersion } = {}) {
   const store = srs || loadStore(storage);
   const prefs = readPrefs(storage, store);
   if (theme === "dark" || theme === "light") prefs.theme = theme;
+  if (examVersion === "701" || examVersion === "801") prefs.examVersion = examVersion;
   return buildProgressBundle({
     srs: store,
     mockHistory: loadMockHistory(storage),
