@@ -36,7 +36,25 @@ import {
   wouldCycle,
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
-import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise } from "./revise.js";
+import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, getReviseStore, reloadReviseFromStorage } from "./revise.js";
+import { isDue, loadStore } from "./schedule.js";
+import {
+  AUTOFOLD_KEY,
+  THEME_KEY,
+  VIEW_MODE_KEY,
+  collectProgress,
+  encryptProgress,
+  isBookmarked,
+  isEncryptedEnvelope,
+  loadBookmarks,
+  loadMockHistory,
+  loadRecent,
+  mergeProgress,
+  pushRecent,
+  readProgressPayload,
+  toggleBookmark,
+  writeProgress,
+} from "./progress.js";
 import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips, setGlossaryOpener } from "./abbr.js";
 import { buildGlossary, initGlossary, showGlossary, hideGlossary, isGlossaryVisible, clearGlossarySession, glossaryHash, getGlossaryEntry, glossarySlug } from "./glossary.js";
 
@@ -59,8 +77,6 @@ const PALETTE = [
 
 const KEY_STORE = "kc-unlock-v1";
 const LOCK_FLAG = "kc-locked";
-const VIEW_MODE_KEY = "kc-view-mode-v1";
-const AUTOFOLD_KEY = "kc-autofold-v1";
 const DATA_BASE = new URL("../data/", import.meta.url);
 
 function readViewMode() {
@@ -106,6 +122,8 @@ const els = {
   themeBtn: $("theme-btn"),
   lockBtn: $("lock-btn"),
   reviseBtn: $("revise-btn"),
+  dueCount: $("due-count"),
+  progressFile: $("progress-import-file"),
   revise: $("revise"),
   glossaryBtn: $("glossary-btn"),
   glossary: $("glossary"),
@@ -812,6 +830,7 @@ function applyRoute({ fitMap = false, restore = null } = {}) {
     if (!isUnder(state.index, state.focusId, selected)) selected = null;
   }
   state.selected = selected;
+  if (state.selected) rememberTopic(state.selected);
   state.editing = false;
   if (restore?.kind === "topic") {
     state.depthOpen = !!restore.depthOpen;
@@ -887,6 +906,7 @@ function openSubject(slug, { focusId = null, selectedId = null, push = true, fit
   state.focusId = nextFocus;
   const nextSelected = selectedId && isUnder(state.index, nextFocus, selectedId) ? selectedId : null;
   state.selected = nextSelected;
+  if (state.selected) rememberTopic(state.selected);
   state.editing = false;
   state.depthOpen = false;
   state.fullNotesOpen = false;
@@ -970,6 +990,7 @@ function select(id, { toggle = false, push = true } = {}) {
     return;
   }
   state.selected = id;
+  rememberTopic(id);
   state.editing = false;
   state.depthOpen = false;
   state.fullNotesOpen = false;
@@ -1341,6 +1362,7 @@ function renderOverview() {
         <button type="button" class="tool" data-ov-act="glossary">Glossary</button>
       </div>
     </div>
+    ${overviewStripHtml()}
     <div class="ov-cards">${cards}</div>
   </div>`;
   if (grid.dataset.key === html) return;
@@ -1348,6 +1370,74 @@ function renderOverview() {
   grid.innerHTML = html;
   grid.dataset.key = html;
   grid.scrollTop = top;
+}
+
+function overviewStripHtml() {
+  refreshDueBadge();
+  const due = dueTodayCount();
+  const bookmarks = loadBookmarks(localStorage).length;
+  const history = loadMockHistory(localStorage);
+  const latest = history[0];
+  let mockLabel = "No mocks yet";
+  if (latest) {
+    const code = latest.examVersion === "701" ? "SY0-701" : "SY0-801";
+    mockLabel = `${latest.pct}% · ${code}`;
+  }
+  let recentBtn = "";
+  if (state.index) {
+    for (const item of loadRecent(localStorage)) {
+      const node = state.index.byId.get(item.id);
+      if (!node || node.id === state.index.rootId) continue;
+      recentBtn = `<button type="button" class="tool ov-strip-continue" data-ov-node="${escapeHtml(node.id)}">Continue · ${escapeHtml(node.title)}</button>`;
+      break;
+    }
+  }
+  return `<aside class="ov-strip" aria-label="Study progress">
+    <div class="ov-strip-stat"><span>Due today</span><strong>${due}</strong></div>
+    <div class="ov-strip-stat"><span>Latest mock</span><strong>${escapeHtml(mockLabel)}</strong></div>
+    <div class="ov-strip-stat"><span>Bookmarks</span><strong>${bookmarks}</strong></div>
+    ${recentBtn}
+  </aside>`;
+}
+
+function dueTodayCount() {
+  try {
+    const store = loadStore();
+    let n = 0;
+    for (const rec of Object.values(store.cards || {})) {
+      if (isDue(rec)) n += 1;
+    }
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
+function refreshDueBadge() {
+  const n = dueTodayCount();
+  if (!els.dueCount) return;
+  if (n > 0) {
+    els.dueCount.hidden = false;
+    els.dueCount.textContent = String(n);
+    els.reviseBtn?.setAttribute("aria-label", `Revise, ${n} due today`);
+  } else {
+    els.dueCount.hidden = true;
+    els.dueCount.textContent = "";
+    els.reviseBtn?.removeAttribute("aria-label");
+  }
+}
+
+function refreshStudyChrome() {
+  refreshDueBadge();
+  if (state.mode === "overview" && els.overviewGrid) {
+    els.overviewGrid.dataset.key = "";
+    renderOverview();
+  }
+}
+
+function rememberTopic(id) {
+  if (!id || !state.index || id === state.index.rootId || !state.index.byId.has(id)) return;
+  try { pushRecent(localStorage, id); } catch { /* ignore */ }
 }
 
 function onOverviewClick(e) {
@@ -1849,7 +1939,10 @@ function renderPanel() {
           <span class="panel-back-x" aria-hidden="true">×</span>
         </button>
         <div class="crumbs">${crumbHtml}</div>
-        ${moreMenuHtml(id)}
+        <div class="panel-tools">
+          <button type="button" class="bookmark-btn" data-act="bookmark" aria-pressed="${isBookmarked(localStorage, id) ? "true" : "false"}" aria-label="${isBookmarked(localStorage, id) ? "Remove bookmark" : "Bookmark this topic"}">${isBookmarked(localStorage, id) ? "Saved" : "Bookmark"}</button>
+          ${moreMenuHtml(id)}
+        </div>
       </div>
       <h1>${escapeHtml(node.title)}${grokBadge}</h1>
       ${jumpBarHtml(jumpItems)}
@@ -2190,6 +2283,103 @@ function toast(message) {
   }, 3400);
 }
 
+function downloadText(filename, text, type = "application/json") {
+  const blob = new Blob([text], { type });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+}
+
+function currentProgressBundle() {
+  const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  return collectProgress(localStorage, { srs: getReviseStore(), theme });
+}
+
+async function exportStudyProgress({ plain = false } = {}) {
+  const bundle = currentProgressBundle();
+  const day = new Date().toISOString().slice(0, 10);
+  els.editsMenu.hidden = true;
+  if (!plain) {
+    if (!state.key) {
+      toast("Unlock the compendium before exporting encrypted progress.");
+      return;
+    }
+    try {
+      const envelope = await encryptProgress(state.key, bundle);
+      downloadText(`kc-progress-${day}.kc-progress.enc.json`, JSON.stringify(envelope, null, 2));
+      toast("Encrypted progress downloaded. It opens with this compendium’s passphrase.");
+    } catch (err) {
+      console.error(err);
+      toast("Could not encrypt the progress file.");
+    }
+    return;
+  }
+  downloadText(`kc-progress-${day}.json`, JSON.stringify(bundle, null, 2));
+  toast("Plain progress JSON downloaded. Anyone with the file can read it.");
+}
+
+function promptImportProgress() {
+  els.editsMenu.hidden = true;
+  els.progressFile?.click();
+}
+
+function applyImportedPrefs(prefs) {
+  if (!prefs) return;
+  if (prefs.theme === "dark" || prefs.theme === "light") applyTheme(prefs.theme);
+  if (prefs.viewMode === "map" || prefs.viewMode === "outline") state.viewMode = prefs.viewMode;
+  if (typeof prefs.autoFold === "boolean") state.autoFold = prefs.autoFold;
+  syncAutoFoldButtons();
+  updateViewSwitch();
+  if (!state.index || state.mode === "revise" || state.mode === "glossary") return;
+  syncSurface();
+}
+
+async function importStudyProgressFile(file) {
+  if (!file) return;
+  let text;
+  try {
+    text = await file.text();
+  } catch {
+    toast("That file could not be read.");
+    return;
+  }
+  let preview;
+  try {
+    preview = JSON.parse(text);
+  } catch {
+    toast("That file could not be imported. It is not valid JSON.");
+    return;
+  }
+  if (isEncryptedEnvelope(preview) && !state.key) {
+    toast("Unlock the compendium before importing an encrypted progress file.");
+    return;
+  }
+  if (!window.confirm("Import this study progress file?")) return;
+  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, and mock history, bookmarks, and recent topics are combined.");
+  try {
+    const incoming = await readProgressPayload(text, state.key);
+    const merged = mergeProgress(currentProgressBundle(), incoming, { replace });
+    writeProgress(localStorage, merged);
+    applyImportedPrefs(merged.prefs);
+    reloadReviseFromStorage();
+    refreshStudyChrome();
+    toast(replace ? "Study progress replaced from the file." : "Study progress merged from the file.");
+  } catch (err) {
+    console.error(err);
+    if (err?.code === "decrypt") {
+      toast("Could not decrypt that progress file. It needs the same passphrase that unlocked this compendium.");
+    } else if (err?.code === "locked") {
+      toast("Unlock the compendium before importing an encrypted progress file.");
+    } else {
+      toast("That file could not be imported. It is not a valid progress file.");
+    }
+  }
+}
+
 function onGlossaryClick(e) {
   const back = e.target.closest("[data-act=glossary-back]");
   if (back) {
@@ -2268,7 +2458,19 @@ function onPanelClick(e) {
   else if (act === "add") addSubtopic();
   else if (act === "move") openMove();
   else if (act === "delete") deleteSelected();
-  else if (act === "filter-doc") {
+  else if (act === "bookmark") {
+    if (!state.selected) return;
+    try {
+      const saved = toggleBookmark(localStorage, state.selected);
+      const on = saved.includes(state.selected);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.setAttribute("aria-label", on ? "Remove bookmark" : "Bookmark this topic");
+      btn.textContent = on ? "Saved" : "Bookmark";
+      refreshStudyChrome();
+    } catch {
+      toast("Could not save that bookmark on this device.");
+    }
+  } else if (act === "filter-doc") {
     state.doc = btn.dataset.doc;
     state.filter = idsPassingDocFilter(state.index, state.doc);
     els.docFilter.value = state.doc;
@@ -2511,6 +2713,9 @@ function wireChrome() {
     openNode,
     leaveRevise,
     toast,
+    exportStudyProgress,
+    promptImportProgress,
+    onStudyDataChanged: refreshStudyChrome,
   });
   initGlossary({
     els: { glossary: els.glossary, glossaryBtn: els.glossaryBtn },
@@ -2654,11 +2859,25 @@ function wireChrome() {
       <button type="button" id="export-edits">Export edits</button>
       <button type="button" id="import-edits">Import edits</button>
       <button type="button" id="discard-edits" ${n || state.editsUnreadable ? "" : "disabled"}>Discard edits</button>
-      <p class="muted">Export writes plaintext JSON so you can merge it into the master notes. It is not encrypted.</p>`;
+      <p class="muted">Export writes plaintext JSON so you can merge it into the master notes. It is not encrypted.</p>
+      <hr class="menu-rule">
+      <p class="menu-label">Study progress</p>
+      <button type="button" id="export-progress">Export progress</button>
+      <button type="button" id="export-progress-plain">Export plain JSON</button>
+      <button type="button" id="import-progress">Import progress</button>
+      <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file.</p>`;
     els.editsMenu.hidden = !els.editsMenu.hidden;
     $("export-edits").onclick = exportEdits;
     $("import-edits").onclick = openImport;
     $("discard-edits").onclick = discardEdits;
+    $("export-progress").onclick = () => exportStudyProgress({ plain: false });
+    $("export-progress-plain").onclick = () => exportStudyProgress({ plain: true });
+    $("import-progress").onclick = () => promptImportProgress();
+  });
+  els.progressFile?.addEventListener("change", () => {
+    const file = els.progressFile.files?.[0];
+    els.progressFile.value = "";
+    if (file) importStudyProgressFile(file);
   });
   document.addEventListener("click", (e) => {
     if (!els.editsMenu.hidden && !e.target.closest("#edits-menu") && e.target !== els.editsBtn) {
@@ -2831,6 +3050,7 @@ async function openCompendium(key) {
     history.replaceState(null, "", "#/");
   }
   applyRoute({ fitMap: true });
+  refreshDueBadge();
 }
 
 function lock() {
@@ -2888,7 +3108,6 @@ els.forgetBtn.addEventListener("click", () => {
 
 boot();
 
-const THEME_KEY = "kc-theme-v1";
 function preferredTheme() {
   try {
     const saved = localStorage.getItem(THEME_KEY);

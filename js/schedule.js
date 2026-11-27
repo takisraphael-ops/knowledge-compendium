@@ -47,6 +47,7 @@ export function sanitizeScope(raw) {
     sectionIds: sanitizeStringList(raw.sectionIds),
     domainIds: sanitizeStringList(raw.domainIds),
     mode,
+    examVersion: raw.examVersion === "701" ? "701" : "801",
   };
 }
 
