@@ -78,7 +78,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "../js/model.js";
-import { renderNotes, renderKeyTerms, renderKeyPoints } from "../js/notes.js";
+import { frameDiagramFigure, renderNotes, renderKeyTerms, renderKeyPoints } from "../js/notes.js";
 import { parseHash } from "../js/route.js";
 import { allocateMockQuestions, domainsForVersion } from "../js/cards.js";
 import {
@@ -116,6 +116,35 @@ check("source block", html.includes('class="src-block"') && html.includes("Oven 
 check("heading bullet table", html.includes("<h3>") && html.includes("<ul>") && html.includes("<ol>") && html.includes("<th>Stage</th>"));
 check("escapes html", !renderNotes("<script>").includes("<script>"));
 check("code url not autolinked", renderNotes("See `https://api.example.com/v1`").includes("<code>https://api.example.com/v1</code>"));
+
+const wideSvg = `<svg class="kc-diagram-wide" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" role="img"><text x="508" y="36">Outside — unattainable</text></svg>`;
+const narrowSvg = `<svg class="kc-diagram-narrow" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 480" role="img"><text x="170" y="36">Outside — unattainable</text></svg>`;
+const diagramHtml = renderNotes(`:::diagram Production possibility frontier\n${wideSvg}\n${narrowSvg}\n:::`);
+const diagramAgain = renderNotes(`:::diagram Production possibility frontier\n${wideSvg}\n${narrowSvg}\n:::`);
+function countClass(html, cls) {
+  return [...html.matchAll(new RegExp(`class="${cls}"`, "g"))].length;
+}
+const plateHtml = diagramHtml.slice(diagramHtml.indexOf('<div class="kc-diagram-plate">'), diagramHtml.indexOf('<div class="kc-diagram-toolbar">'));
+check(
+  "one zoom control and one plate for a two-svg diagram",
+  countClass(diagramHtml, "kc-diagram-zoom") === 1 &&
+  countClass(diagramHtml, "kc-diagram-plate") === 1 &&
+  countClass(diagramHtml, "kc-diagram-toolbar") === 1 &&
+  diagramHtml.includes("kc-diagram-wide") &&
+  diagramHtml.includes("kc-diagram-narrow") &&
+  !plateHtml.includes("kc-diagram-zoom") &&
+  diagramHtml.indexOf('class="kc-diagram-toolbar"') < diagramHtml.indexOf("<figcaption>") &&
+  countClass(diagramAgain, "kc-diagram-zoom") === 1
+);
+const pbqHtml = frameDiagramFigure(`${wideSvg}${narrowSvg}`, "pbq-diagram");
+check(
+  "one zoom control on a pbq figure with two svgs",
+  pbqHtml.includes("pbq-diagram") &&
+  countClass(pbqHtml, "kc-diagram-zoom") === 1 &&
+  countClass(pbqHtml, "kc-diagram-plate") === 1 &&
+  pbqHtml.includes("kc-diagram-wide") &&
+  pbqHtml.includes("kc-diagram-narrow")
+);
 check("SY0-801 and SY0-701 domains", domainsForVersion("801")[1].label.includes("Attacks (24%)") && domainsForVersion("701")[1].label.includes("Mitigations (22%)"));
 
 function plenty(domains, n = 1000) {
@@ -1743,7 +1772,7 @@ check(
 const worker = await readFile(join(root, "sw.js"), "utf8");
 check(
   "service worker precaches gist sync and self-hosted fonts and skips the github api",
-  worker.includes('const CACHE = "kc-app-v8"') &&
+  worker.includes('const CACHE = "kc-app-v9"') &&
   worker.includes("./js/gist-sync.js") &&
   worker.includes("./assets/fonts/inter-latin.woff2") &&
   worker.includes("./assets/fonts/newsreader-latin.woff2") &&

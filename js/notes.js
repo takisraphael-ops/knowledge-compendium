@@ -573,23 +573,83 @@ function wrapDiagramSvg(svgHtml) {
 
 const DIAGRAM_ZOOM_BTN = `<button type="button" class="kc-diagram-zoom" aria-label="Enlarge diagram"><svg class="kc-diagram-zoom-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><circle cx="6.5" cy="6.5" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M9.5 9.5 L13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="kc-diagram-zoom-label">Zoom</span></button>`;
 
-function diagramPlateHtml(svgHtml) {
-  return `<div class="kc-diagram-plate">${DIAGRAM_ZOOM_BTN}${wrapDiagramSvg(svgHtml)}</div>`;
+function diagramSvgHtml(chunk) {
+  // Browsers sanitize. The node selftest has no DOMParser, so it keeps SVG markup it already built.
+  if (typeof DOMParser === "undefined") return /<svg\b/i.test(chunk) ? chunk : "";
+  return sanitizeOneSvg(chunk);
+}
+
+function diagramSvgsFrom(raw) {
+  return extractSvgChunks(raw).map(diagramSvgHtml).filter((html) => /<svg\b/i.test(html));
+}
+
+function diagramFigureHtml(svgs, className, captionHtml) {
+  const extra = className ? ` ${className}` : "";
+  const scrolls = svgs.map(wrapDiagramSvg).join("");
+  const cap = captionHtml || "";
+  return `<figure class="kc-diagram${extra}"><div class="kc-diagram-plate">${scrolls}</div><div class="kc-diagram-toolbar">${DIAGRAM_ZOOM_BTN}</div>${cap}</figure>`;
 }
 
 /** Framed diagram plate used by topic notes and PBQ figures. */
 export function frameDiagramFigure(svgHtml, className = "") {
   const clean = String(svgHtml || "").trim();
   if (!clean) return "";
-  const extra = className ? ` ${className}` : "";
-  return `<figure class="kc-diagram${extra}">${diagramPlateHtml(clean)}</figure>`;
+  const svgs = diagramSvgsFrom(clean);
+  if (!svgs.length) return "";
+  return diagramFigureHtml(svgs, className, "");
 }
 
 function renderDiagram(raw, caption) {
-  const svgs = extractSvgChunks(raw).map(sanitizeOneSvg).filter(Boolean);
+  const svgs = diagramSvgsFrom(raw);
   const cap = caption ? `<figcaption>${inline(caption)}</figcaption>` : "";
   if (!svgs.length) return cap ? `<p class="kc-diagram-fallback">${inline(caption)}</p>` : "";
-  return `<figure class="kc-diagram">${svgs.map(diagramPlateHtml).join("")}${cap}</figure>`;
+  return diagramFigureHtml(svgs, "", cap);
+}
+
+/**
+ * One Zoom control per diagram figure. Safe to call after every topic render:
+ * a figure that already has a single toolbar control is left as it is.
+ */
+export function initDiagramZoom(root) {
+  if (!root || typeof root.querySelectorAll !== "function" || typeof document === "undefined") return 0;
+  const figures = [];
+  if (typeof root.matches === "function" && root.matches("figure.kc-diagram")) figures.push(root);
+  for (const figure of root.querySelectorAll("figure.kc-diagram")) figures.push(figure);
+  const seen = new Set();
+  let count = 0;
+  for (const figure of figures) {
+    if (seen.has(figure)) continue;
+    seen.add(figure);
+    count += ensureFigureZoom(figure);
+  }
+  return count;
+}
+
+function ensureFigureZoom(figure) {
+  const plates = [...figure.querySelectorAll(":scope > .kc-diagram-plate")];
+  if (!plates.length) return 0;
+  const plate = plates[0];
+  for (const extra of plates.slice(1)) {
+    for (const scroll of [...extra.querySelectorAll(".kc-diagram-scroll")]) plate.appendChild(scroll);
+    extra.remove();
+  }
+  let toolbar = figure.querySelector(":scope > .kc-diagram-toolbar");
+  if (!toolbar) {
+    toolbar = document.createElement("div");
+    toolbar.className = "kc-diagram-toolbar";
+  }
+  if (plate.nextElementSibling !== toolbar) plate.insertAdjacentElement("afterend", toolbar);
+  const buttons = [...figure.querySelectorAll("button.kc-diagram-zoom")];
+  const keeper = buttons.find((btn) => toolbar.contains(btn)) || buttons[0] || null;
+  if (keeper && !toolbar.contains(keeper)) toolbar.appendChild(keeper);
+  for (const btn of buttons) {
+    if (btn !== keeper) btn.remove();
+  }
+  for (const bar of [...figure.querySelectorAll(".kc-diagram-toolbar")]) {
+    if (bar !== toolbar) bar.remove();
+  }
+  if (!toolbar.querySelector("button.kc-diagram-zoom")) toolbar.insertAdjacentHTML("beforeend", DIAGRAM_ZOOM_BTN);
+  return 1;
 }
 
 function consumeDiagram(lines, i) {
