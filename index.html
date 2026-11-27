@@ -133,6 +133,15 @@
   </div>
 
   <div id="modal" hidden></div>
+  <div id="diagram-lightbox" class="diagram-lightbox" hidden>
+    <div class="diagram-lightbox-dialog" role="dialog" aria-modal="true" aria-labelledby="diagram-lightbox-title">
+      <div class="diagram-lightbox-bar">
+        <p id="diagram-lightbox-title" class="diagram-lightbox-title">Diagram</p>
+        <button type="button" class="diagram-lightbox-close" id="diagram-lightbox-close" data-diagram-close aria-label="Close diagram">Close</button>
+      </div>
+      <div id="diagram-lightbox-body" class="diagram-lightbox-body"></div>
+    </div>
+  </div>
   <div id="toast" hidden role="status"></div>
   <noscript>This compendium needs JavaScript to decrypt and draw the map.</noscript>
   <script type="module" src="js/main.js"></script>

@@ -1,4 +1,4 @@
-const CACHE = "kc-app-v7";
+const CACHE = "kc-app-v8";
 const SHELL = [
   "./",
   "./index.html",

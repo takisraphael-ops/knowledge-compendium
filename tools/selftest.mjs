@@ -1743,7 +1743,7 @@ check(
 const worker = await readFile(join(root, "sw.js"), "utf8");
 check(
   "service worker precaches gist sync and self-hosted fonts and skips the github api",
-  worker.includes('const CACHE = "kc-app-v7"') &&
+  worker.includes('const CACHE = "kc-app-v8"') &&
   worker.includes("./js/gist-sync.js") &&
   worker.includes("./assets/fonts/inter-latin.woff2") &&
   worker.includes("./assets/fonts/newsreader-latin.woff2") &&

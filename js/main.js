@@ -37,8 +37,9 @@ import {
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 import { buildBacklinkIndex } from "./backlinks.js";
 import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise, getReviseStore, reloadReviseFromStorage, adoptExternalProgress, applyImportedExamVersion, currentExamVersion } from "./revise.js";
-import { collectTermsForNode, keyPointsOf, parsePracticePairs } from "./cards.js";
-import { isDue } from "./schedule.js";
+import { collectTermsForNode, keyPointsCardId, keyPointsOf, parsePracticePairs, practiceCardId, termCardId } from "./cards.js";
+import { isDue, statsForCards } from "./schedule.js";
+import { tierFor, tierLabel } from "./readiness.js";
 import {
   createSearchIndex,
   nodeIdFromCardId,
@@ -1528,7 +1529,7 @@ function renderOverview() {
     return `<article class="ov-card" style="--c:${color}" data-ov-open="${escapeHtml(subject.slug)}">
       <div class="ov-card-top">
         <button type="button" class="ov-main" data-ov-open="${escapeHtml(subject.slug)}">
-          <span class="ov-title">${escapeHtml(subject.title)}</span>
+          <span class="ov-title"><span class="dot" style="--c:${color}" aria-hidden="true"></span><span class="ov-title-text">${escapeHtml(subject.title)}</span></span>
           <span class="ov-count">${escapeHtml(topicCountLabel(subject.count))}</span>
           ${summaryHtml}
         </button>
@@ -1598,7 +1599,7 @@ function outlineRow(id, depth, seen = new Set()) {
     ? `<button type="button" class="ol-chevron" data-ol-toggle="${escapeHtml(id)}" aria-expanded="${open ? "true" : "false"}" aria-label="${open ? "Collapse" : "Expand"}"><span class="chev" aria-hidden="true"></span></button>`
     : `<span class="ol-chevron-spacer" aria-hidden="true"></span>`;
   const badge = !open && kids.length ? `<span class="ol-badge">${kids.length}</span>` : "";
-  const row = `<div class="ol-row${selected}" role="treeitem" data-ol-id="${escapeHtml(id)}" aria-selected="${selected ? "true" : "false"}" aria-expanded="${kids.length ? String(open) : "false"}" style="--depth:${depth};--c:${color}">${chevron}<button type="button" class="ol-label" data-ol-select="${escapeHtml(id)}"><span class="dot" style="--c:${color}" aria-hidden="true"></span><span class="ol-title">${highlightTitle(node.title, state.query)}</span>${badge}</button></div>`;
+  const row = `<div class="ol-row${selected}" role="treeitem" data-ol-id="${escapeHtml(id)}" aria-selected="${selected ? "true" : "false"}" aria-expanded="${kids.length ? String(open) : "false"}" style="--depth:${depth};--c:${color}"><span class="ol-accent" aria-hidden="true"></span>${chevron}<button type="button" class="ol-label" data-ol-select="${escapeHtml(id)}"><span class="dot" style="--c:${color}" aria-hidden="true"></span><span class="ol-title">${highlightTitle(node.title, state.query)}</span>${badge}</button></div>`;
   const children = open && kids.length
     ? `<div class="ol-children" role="group">${kids.map((kid) => outlineRow(kid, depth + 1, seen)).join("")}</div>`
     : "";
@@ -2092,6 +2093,27 @@ function personalNoteHtml(id) {
   </section>`;
 }
 
+function topicReadinessHtml(node) {
+  if (!node?.id) return "";
+  const cards = [];
+  if (keyPointsOf(node).length) cards.push({ id: keyPointsCardId(node.id) });
+  const practice = parsePracticePairs(node.expanded || "");
+  for (const item of practice.items || []) cards.push({ id: practiceCardId(node.id, item.n) });
+  for (const term of collectTermsForNode(node)) cards.push({ id: termCardId(node.id, term.slug) });
+  if (!cards.length) return "";
+  let store;
+  try { store = getReviseStore(); } catch { return ""; }
+  const stats = statsForCards(store || { cards: {} }, cards);
+  const started = stats.reviewed > 0 && stats.readiness != null;
+  const tier = tierFor(stats.readiness, started);
+  const name = tierLabel(tier);
+  const label = started ? `${name} ${Math.round(stats.readiness)}%` : name;
+  const detail = started
+    ? `${name}, ${Math.round(stats.readiness)} percent readiness for this topic`
+    : "Revision not started for this topic";
+  return `<span class="readiness-pill tier-${tier}" title="${escapeHtml(detail)}">${escapeHtml(label)}</span>`;
+}
+
 function backlinksHtml(id) {
   const list = state.backlinks?.get(id) || [];
   if (!list.length) return "";
@@ -2225,6 +2247,7 @@ function renderPanel() {
           <span class="panel-back-x" aria-hidden="true">×</span>
         </button>
         <div class="crumbs">${crumbHtml}</div>
+        ${topicReadinessHtml(node)}
         ${panelStudyActions(id)}
       </div>
       <h1>${escapeHtml(node.title)}${notePipHtml(id)}${grokBadge}</h1>
@@ -2548,6 +2571,119 @@ function refresh() {
     draw();
   }
   renderPanel();
+}
+
+let diagramReturnFocus = null;
+
+function diagramHit(event) {
+  if (event.button != null && event.button !== 0) return null;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return null;
+  if (event.target.closest?.("a, summary, input, textarea, select, label")) return null;
+  const zoom = event.target.closest?.(".kc-diagram-zoom");
+  if (zoom) {
+    const plate = zoom.closest(".kc-diagram-plate");
+    return plate ? { plate, trigger: zoom } : null;
+  }
+  if (event.target.closest?.("button")) return null;
+  const plate = event.target.closest?.(".kc-diagram-plate");
+  if (!plate) return null;
+  return { plate, trigger: plate.querySelector(".kc-diagram-zoom") || plate };
+}
+
+function lightboxFocusables() {
+  const root = $("diagram-lightbox");
+  if (!root || root.hidden) return [];
+  return [...root.querySelectorAll("button, a[href], [tabindex]:not([tabindex='-1'])")].filter((el) => {
+    if (el.hidden || el.disabled) return false;
+    if (el.getAttribute("aria-hidden") === "true") return false;
+    return true;
+  });
+}
+
+function diagramSvg(plate) {
+  const scrolls = [...(plate?.querySelectorAll(".kc-diagram-scroll") || [])];
+  const visible = scrolls.find((el) => getComputedStyle(el).display !== "none");
+  return (visible || scrolls[0])?.querySelector("svg") || null;
+}
+
+function openDiagramLightbox(plate, trigger) {
+  const svg = diagramSvg(plate);
+  const box = $("diagram-lightbox");
+  const body = $("diagram-lightbox-body");
+  if (!svg || !box || !body) return;
+  body.replaceChildren(svg.cloneNode(true));
+  const caption = plate.closest("figure")?.querySelector("figcaption")?.textContent?.replace(/\s+/g, " ").trim();
+  const title = $("diagram-lightbox-title");
+  if (title) title.textContent = caption || "Diagram";
+  diagramReturnFocus = trigger instanceof HTMLElement ? trigger : document.activeElement;
+  const app = $("app");
+  const gate = $("gate");
+  if (app) app.inert = true;
+  if (gate) gate.inert = true;
+  box.hidden = false;
+  ($("diagram-lightbox-close") || box.querySelector("[data-diagram-close]"))?.focus();
+}
+
+function closeDiagramLightbox() {
+  const box = $("diagram-lightbox");
+  if (!box || box.hidden) return;
+  box.hidden = true;
+  $("diagram-lightbox-body")?.replaceChildren();
+  const app = $("app");
+  const gate = $("gate");
+  if (app) app.inert = false;
+  if (gate) gate.inert = false;
+  const back = diagramReturnFocus;
+  diagramReturnFocus = null;
+  if (back instanceof HTMLElement && document.contains(back)) back.focus();
+}
+
+function onDiagramClick(event) {
+  const hit = diagramHit(event);
+  if (!hit) return;
+  event.preventDefault();
+  openDiagramLightbox(hit.plate, hit.trigger);
+}
+
+function onDiagramLightboxClick(event) {
+  const box = $("diagram-lightbox");
+  if (!box || box.hidden) return;
+  if (event.target === box || event.target.closest?.("[data-diagram-close]")) closeDiagramLightbox();
+}
+
+function onDiagramLightboxKey(event) {
+  const box = $("diagram-lightbox");
+  if (!box || box.hidden) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeDiagramLightbox();
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") return;
+  if (event.key === "Tab") {
+    const items = lightboxFocusables();
+    if (!items.length) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !box.contains(active))) {
+      event.preventDefault();
+      event.stopPropagation();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !box.contains(active))) {
+      event.preventDefault();
+      event.stopPropagation();
+      first.focus();
+    }
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function openModal(html) {
@@ -3654,6 +3790,9 @@ function wireChrome() {
   els.glossary?.addEventListener("click", onGlossaryClick);
   wirePanelResize();
   els.panel.addEventListener("click", onPanelClick);
+  document.addEventListener("click", onDiagramClick);
+  $("diagram-lightbox")?.addEventListener("click", onDiagramLightboxClick);
+  document.addEventListener("keydown", onDiagramLightboxKey, true);
   els.panel.addEventListener("input", onPersonalNoteInput);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flushPersonalNote();

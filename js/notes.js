@@ -571,11 +571,25 @@ function wrapDiagramSvg(svgHtml) {
   return `<div class="${wrap}">${svgHtml}</div>`;
 }
 
+const DIAGRAM_ZOOM_BTN = `<button type="button" class="kc-diagram-zoom" aria-label="Enlarge diagram"><svg class="kc-diagram-zoom-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><circle cx="6.5" cy="6.5" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M9.5 9.5 L13 13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="kc-diagram-zoom-label">Zoom</span></button>`;
+
+function diagramPlateHtml(svgHtml) {
+  return `<div class="kc-diagram-plate">${DIAGRAM_ZOOM_BTN}${wrapDiagramSvg(svgHtml)}</div>`;
+}
+
+/** Framed diagram plate used by topic notes and PBQ figures. */
+export function frameDiagramFigure(svgHtml, className = "") {
+  const clean = String(svgHtml || "").trim();
+  if (!clean) return "";
+  const extra = className ? ` ${className}` : "";
+  return `<figure class="kc-diagram${extra}">${diagramPlateHtml(clean)}</figure>`;
+}
+
 function renderDiagram(raw, caption) {
   const svgs = extractSvgChunks(raw).map(sanitizeOneSvg).filter(Boolean);
   const cap = caption ? `<figcaption>${inline(caption)}</figcaption>` : "";
   if (!svgs.length) return cap ? `<p class="kc-diagram-fallback">${inline(caption)}</p>` : "";
-  return `<figure class="kc-diagram">${svgs.map(wrapDiagramSvg).join("")}${cap}</figure>`;
+  return `<figure class="kc-diagram">${svgs.map(diagramPlateHtml).join("")}${cap}</figure>`;
 }
 
 function consumeDiagram(lines, i) {
