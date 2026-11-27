@@ -4,7 +4,7 @@
  */
 import { escapeHtml, renderNotes } from "./notes.js";
 import { wrapPanelAbbrs } from "./abbr.js";
-import { collectCards, SY0_DOMAINS } from "./cards.js";
+import { collectCards, domainsForVersion, SY0_VERSIONS } from "./cards.js";
 import {
   loadStore,
   saveStore,
@@ -25,7 +25,7 @@ import {
 let hooks = null;
 let store = null;
 let view = "hub";
-let scope = { branchIds: [], sectionIds: [], domainIds: [], mode: "flashcards" };
+let scope = { branchIds: [], sectionIds: [], domainIds: [], mode: "flashcards", examVersion: "801" };
 let queue = [];
 let cursor = 0;
 let revealed = false;
@@ -73,7 +73,7 @@ export function getReviseSnapshot() {
     view,
     cursor,
     revealed,
-    scope: { branchIds: [...(scope.branchIds || [])], sectionIds: [...(scope.sectionIds || [])], domainIds: [...(scope.domainIds || [])], mode: scope.mode },
+    scope: { branchIds: [...(scope.branchIds || [])], sectionIds: [...(scope.sectionIds || [])], domainIds: [...(scope.domainIds || [])], mode: scope.mode, examVersion: scope.examVersion === "701" ? "701" : "801" },
   };
 }
 
@@ -112,6 +112,7 @@ function restoreScope() {
       sectionIds: [...(saved.sectionIds || [])],
       domainIds: [...(saved.domainIds || [])],
       mode: saved.mode === "practice" || saved.mode === "keypoints" ? saved.mode : "flashcards",
+      examVersion: saved.examVersion === "701" ? "701" : "801",
     };
     // Drop ids that no longer exist
     const known = new Set((st.subjects || []).map((s) => s.rootId));
@@ -211,7 +212,14 @@ function renderHub() {
 
   let domainHtml = "";
   if (showDomains) {
-    const boxes = SY0_DOMAINS.map((d) => {
+    const ver = scope.examVersion === "701" ? "701" : "801";
+    const activeDomains = domainsForVersion(ver);
+    const verBtns = Object.entries(SY0_VERSIONS).map(([k, v]) => `
+      <label class="rev-ver ${ver === k ? "on" : ""}">
+        <input type="radio" name="rev-exam-ver" data-act="exam-ver" value="${k}" ${ver === k ? "checked" : ""}>
+        <span>${escapeHtml(v.label)}</span>
+      </label>`).join("");
+    const boxes = activeDomains.map((d) => {
       const on = scope.domainIds.includes(d.id);
       return `<label class="rev-check">
         <input type="checkbox" data-act="domain" value="${escapeHtml(d.id)}" ${on ? "checked" : ""}>
@@ -219,7 +227,7 @@ function renderHub() {
       </label>`;
     }).join("");
     domainHtml = `<div class="rev-fieldset">
-      <div class="rev-legend">Security+ domains <span class="rev-hint">(optional study grouping of Cyber sections — topics are not officially tagged in the notes)</span></div>
+      <div class="rev-legend">Security+ domains <span class="rev-ver-switch" role="radiogroup" aria-label="Security+ exam version">${verBtns}</span> <span class="rev-hint">(optional study grouping of Cyber sections with official exam weights)</span></div>
       <div class="rev-checks">${boxes}</div>
     </div>`;
   }
@@ -337,7 +345,9 @@ function renderProgressBlocks(st, cards, scopeStats) {
     }
   }
 
-  const domainRows = SY0_DOMAINS.filter((d) => byDomain.has(d.id)).map((d) => {
+  const ver = scope.examVersion === "701" ? "701" : "801";
+  const verCode = (SY0_VERSIONS[ver] || SY0_VERSIONS["801"]).code;
+  const domainRows = domainsForVersion(ver).filter((d) => byDomain.has(d.id)).map((d) => {
     const stats = statsForCards(store, byDomain.get(d.id));
     return row(d.label, stats);
   });
@@ -350,7 +360,7 @@ function renderProgressBlocks(st, cards, scopeStats) {
     <p class="rev-disclaimer">This is a self-assessment, not a predicted exam score. It is the share of cards you have already reviewed whose last rating was Good or Easy.</p>
     ${table("By branch", branchRows)}
     ${sectionRows.length ? table("By section", sectionRows, true) : ""}
-    ${domainRows.length ? table("By Security+ study grouping", domainRows) : ""}
+    ${domainRows.length ? table(`By Security+ ${verCode} study grouping`, domainRows) : ""}
   </section>`;
 }
 
@@ -552,6 +562,10 @@ function onChange(e) {
     if (t.checked) set.add(t.value);
     else set.delete(t.value);
     scope.domainIds = [...set];
+    persistScope();
+    render();
+  } else if (t.dataset.act === "exam-ver") {
+    scope.examVersion = t.value === "701" ? "701" : "801";
     persistScope();
     render();
   } else if (t.dataset.act === "mode") {

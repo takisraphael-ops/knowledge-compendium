@@ -1871,3 +1871,28 @@ figure.kc-diagram figcaption {
     page-break-inside: avoid;
   }
 }
+
+/* === Revise exam version switch === */
+.rev-ver-switch {
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 6px;
+  vertical-align: middle;
+}
+.rev-ver {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--muted);
+}
+.rev-ver input { position: absolute; opacity: 0; pointer-events: none; }
+.rev-ver.on {
+  background: rgba(15, 110, 107, 0.14);
+  border-color: var(--teal);
+  color: var(--teal);
+}

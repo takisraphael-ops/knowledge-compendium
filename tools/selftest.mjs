@@ -22,6 +22,7 @@ import {
 } from "../js/model.js";
 import { renderNotes, renderKeyTerms, renderKeyPoints } from "../js/notes.js";
 import { parseHash } from "../js/route.js";
+import { domainsForVersion } from "../js/cards.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 let failed = 0;
@@ -41,6 +42,7 @@ check("source block", html.includes('class="src-block"') && html.includes("Oven 
 check("heading bullet table", html.includes("<h3>") && html.includes("<ul>") && html.includes("<ol>") && html.includes("<th>Stage</th>"));
 check("escapes html", !renderNotes("<script>").includes("<script>"));
 check("code url not autolinked", renderNotes("See `https://api.example.com/v1`").includes("<code>https://api.example.com/v1</code>"));
+check("SY0-801 and SY0-701 domains", domainsForVersion("801")[1].label.includes("Attacks (24%)") && domainsForVersion("701")[1].label.includes("Mitigations (22%)"));
 check("malformed legacy hash safe", parseHash("#%E0%A4%A", { index: buildIndex([{ id: "root", title: "Root", parentId: null }]), subjects: [] }).mode === "overview");
 
 const base = [

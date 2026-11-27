@@ -9,13 +9,36 @@ const STUDY_START = /^(?:#{1,6}\s+)?(?:Exam tips|Exam point|Exam clue|Memory aid
 
 /** Official-style Security+ domain groups of existing top-level cyber sections.
  *  These are a front-end study grouping, not tags stored in the notes. */
-export const SY0_DOMAINS = [
-  { id: "sy0-d1", label: "1. General Security Concepts", sectionIds: ["c90", "c185", "c12e"] },
-  { id: "sy0-d2", label: "2. Threats, Vulnerabilities, and Attacks", sectionIds: ["cd1"] },
-  { id: "sy0-d3", label: "3. Security Architecture", sectionIds: ["c248", "c1ff"] },
-  { id: "sy0-d4", label: "4. Security Operations", sectionIds: ["c1", "c1bb"] },
-  { id: "sy0-d5", label: "5. Security Program Management and Oversight", sectionIds: ["c28d"] },
-];
+export const SY0_VERSIONS = {
+  "801": {
+    code: "SY0-801",
+    label: "SY0-801 (V8)",
+    domains: [
+      { id: "sy0-d1", label: "1. General Security Concepts (16%)", weight: 16, sectionIds: ["c90", "c185", "c12e"] },
+      { id: "sy0-d2", label: "2. Threats, Vulnerabilities, and Attacks (24%)", weight: 24, sectionIds: ["cd1"] },
+      { id: "sy0-d3", label: "3. Security Architecture (19%)", weight: 19, sectionIds: ["c248", "c1ff"] },
+      { id: "sy0-d4", label: "4. Security Operations (27%)", weight: 27, sectionIds: ["c1", "c1bb"] },
+      { id: "sy0-d5", label: "5. Security Program Management and Oversight (14%)", weight: 14, sectionIds: ["c28d"] },
+    ],
+  },
+  "701": {
+    code: "SY0-701",
+    label: "SY0-701 (V7)",
+    domains: [
+      { id: "sy0-d1", label: "1. General Security Concepts (12%)", weight: 12, sectionIds: ["c90", "c185", "c12e"] },
+      { id: "sy0-d2", label: "2. Threats, Vulnerabilities, and Mitigations (22%)", weight: 22, sectionIds: ["cd1"] },
+      { id: "sy0-d3", label: "3. Security Architecture (18%)", weight: 18, sectionIds: ["c248", "c1ff"] },
+      { id: "sy0-d4", label: "4. Security Operations (28%)", weight: 28, sectionIds: ["c1", "c1bb"] },
+      { id: "sy0-d5", label: "5. Security Program Management and Oversight (20%)", weight: 20, sectionIds: ["c28d"] },
+    ],
+  },
+};
+
+export function domainsForVersion(ver = "801") {
+  return (SY0_VERSIONS[ver] || SY0_VERSIONS["801"]).domains;
+}
+
+export const SY0_DOMAINS = SY0_VERSIONS["801"].domains;
 
 const DOMAIN_BY_SECTION = new Map();
 for (const d of SY0_DOMAINS) {
