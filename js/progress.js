@@ -1,8 +1,9 @@
 /**
  * Cross-device study progress: SRS, mock-exam history, bookmarks, recent
- * topics, personal scratch notes, PBQ scores, and UI prefs. Compendium topic
- * text is never stored here. Personal notes are the reader's own `kc-notes-v1`
- * map. PBQ scores are the reader's own `kc-pbq-v1` map.
+ * topics, personal scratch notes, the quick-capture inbox, PBQ scores, and UI
+ * prefs. Compendium topic text is never stored here. Personal notes are the
+ * reader's own `kc-notes-v1` map. Quick captures are `kc-inbox-v1`. PBQ scores
+ * are the reader's own `kc-pbq-v1` map.
  */
 import { decryptJson, encryptJson } from "./crypto.js";
 import { loadPbqProgress, mergePbqProgress, sanitizePbqProgress, savePbqProgress } from "./pbq.js";
@@ -13,8 +14,11 @@ export const PROGRESS_AAD = "kc-progress-v1";
 export const BOOKMARKS_KEY = "kc-bookmarks-v1";
 export const RECENT_KEY = "kc-recent-v1";
 export const NOTES_KEY = "kc-notes-v1";
+export const INBOX_KEY = "kc-inbox-v1";
 export const MOCK_HISTORY_KEY = "kc-mock-history-v1";
 export const NOTE_TEXT_CAP = 50000;
+export const INBOX_TEXT_CAP = 8000;
+export const INBOX_CAP = 400;
 export const THEME_KEY = "kc-theme-v1";
 export const VIEW_MODE_KEY = "kc-view-mode-v1";
 export const AUTOFOLD_KEY = "kc-autofold-v1";
@@ -124,6 +128,158 @@ export function upsertNote(storage, id, text, now = Date.now()) {
   if (!body.trim()) delete all[clean];
   else all[clean] = { text: body.length > NOTE_TEXT_CAP ? body.slice(0, NOTE_TEXT_CAP) : body, updatedAt: now };
   return saveNotes(all, storage);
+}
+
+function cleanInboxId(id) {
+  if (typeof id !== "string") return "";
+  const s = id.trim();
+  if (!s || s.length > 80 || !/^[a-zA-Z0-9:_./-]+$/.test(s)) return "";
+  return s;
+}
+
+export function makeInboxId(now = Date.now()) {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `in-${now.toString(36)}-${rand}`;
+}
+
+function sanitizeInboxItem(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const id = cleanInboxId(raw.id);
+  if (!id || typeof raw.text !== "string") return null;
+  let text = raw.text.length > INBOX_TEXT_CAP ? raw.text.slice(0, INBOX_TEXT_CAP) : raw.text;
+  text = text.trim();
+  if (!text) return null;
+  const created = Number(raw.createdAt);
+  const updated = Number(raw.updatedAt);
+  const createdAt = Number.isFinite(created) ? created : (Number.isFinite(updated) ? updated : 0);
+  const updatedAt = Number.isFinite(updated) ? updated : createdAt;
+  const item = { id, text, createdAt, updatedAt };
+  const link = cleanId(raw.linkedNodeId);
+  if (link) item.linkedNodeId = link;
+  if (raw.archived === true) item.archived = true;
+  return item;
+}
+
+/** Newest `updatedAt` first. Blank text and bad ids are dropped. */
+export function sanitizeInbox(raw) {
+  const list = Array.isArray(raw) ? raw : Array.isArray(raw?.items) ? raw.items : [];
+  const byId = new Map();
+  for (const row of list) {
+    const item = sanitizeInboxItem(row);
+    if (!item) continue;
+    const prev = byId.get(item.id);
+    if (!prev || item.updatedAt >= prev.updatedAt) byId.set(item.id, item);
+  }
+  return [...byId.values()]
+    .sort((a, b) => (b.updatedAt - a.updatedAt) || (b.createdAt - a.createdAt) || a.id.localeCompare(b.id))
+    .slice(0, INBOX_CAP);
+}
+
+/** Per-id newest `updatedAt` wins. A tie keeps the current copy. */
+export function mergeInbox(current, incoming) {
+  const byId = new Map(sanitizeInbox(current).map((item) => [item.id, item]));
+  for (const item of sanitizeInbox(incoming)) {
+    const prev = byId.get(item.id);
+    if (!prev || item.updatedAt > prev.updatedAt) byId.set(item.id, item);
+  }
+  return sanitizeInbox([...byId.values()]);
+}
+
+export function loadInbox(storage) {
+  return sanitizeInbox(readJson(storage, INBOX_KEY));
+}
+
+export function saveInbox(items, storage) {
+  const safe = sanitizeInbox(items);
+  if (storage) {
+    if (safe.length) storage.setItem(INBOX_KEY, JSON.stringify(safe));
+    else storage.removeItem?.(INBOX_KEY);
+  }
+  return safe;
+}
+
+export function openInboxCount(items) {
+  return sanitizeInbox(items).reduce((n, item) => n + (item.archived ? 0 : 1), 0);
+}
+
+/** Append one capture. An empty trimmed value leaves the inbox unchanged. */
+export function addInboxItem(storage, { text, linkedNodeId, id, now = Date.now() } = {}) {
+  const all = loadInbox(storage);
+  const item = sanitizeInboxItem({
+    id: id || makeInboxId(now),
+    text,
+    createdAt: now,
+    updatedAt: now,
+    linkedNodeId,
+  });
+  if (!item) return all;
+  return saveInbox([item, ...all.filter((row) => row.id !== item.id)], storage);
+}
+
+/** Patch one capture. An empty trimmed `text` deletes it. */
+export function updateInboxItem(storage, id, patch = {}, now = Date.now()) {
+  const clean = cleanInboxId(id);
+  const all = loadInbox(storage);
+  const prev = all.find((row) => row.id === clean);
+  if (!prev) return all;
+  const next = sanitizeInboxItem({
+    id: prev.id,
+    text: hasOwn(patch, "text") ? patch.text : prev.text,
+    createdAt: prev.createdAt,
+    updatedAt: now,
+    linkedNodeId: hasOwn(patch, "linkedNodeId") ? patch.linkedNodeId : prev.linkedNodeId,
+    archived: hasOwn(patch, "archived") ? patch.archived === true : prev.archived === true,
+  });
+  const rest = all.filter((row) => row.id !== prev.id);
+  if (!next) return saveInbox(rest, storage);
+  return saveInbox([next, ...rest], storage);
+}
+
+export function removeInboxItem(storage, id) {
+  const clean = cleanInboxId(id);
+  return saveInbox(loadInbox(storage).filter((row) => row.id !== clean), storage);
+}
+
+function inboxStamp(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  try { return new Date(n).toISOString(); } catch { return ""; }
+}
+
+/** Markdown batch for folding captures into the permanent notes. */
+export function inboxToMarkdown(items, titles = {}) {
+  const all = sanitizeInbox(items);
+  const open = all.filter((item) => !item.archived);
+  const archived = all.filter((item) => item.archived);
+  const names = titles && typeof titles === "object" ? titles : {};
+  const lines = ["# Quick capture inbox", ""];
+  const write = (heading, list) => {
+    lines.push(`## ${heading}`, "");
+    if (!list.length) {
+      lines.push("_None._", "");
+      return;
+    }
+    for (const item of list) {
+      const body = item.text.replace(/\r\n/g, "\n").trim();
+      const [first, ...rest] = body.split("\n");
+      lines.push(`- ${first}`);
+      for (const line of rest) lines.push(`  ${line}`);
+      let meta = inboxStamp(item.updatedAt || item.createdAt) || "undated";
+      if (item.linkedNodeId) {
+        const title = names[item.linkedNodeId] || item.linkedNodeId;
+        meta += ` · ${title} (\`${item.linkedNodeId}\`)`;
+      }
+      lines.push(`  - ${meta}`);
+    }
+    lines.push("");
+  };
+  write("Open", open);
+  write("Archived", archived);
+  return lines.join("\n").replace(/\n+$/, "\n");
+}
+
+export function inboxToJson(items) {
+  return JSON.stringify({ version: 1, inbox: sanitizeInbox(items) }, null, 2);
 }
 
 export function sanitizeRecent(raw) {
@@ -409,7 +565,7 @@ function stampScope(store, examVersion) {
   return store;
 }
 
-export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes, pbq, prefs, exportedAt } = {}) {
+export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes, inbox, pbq, prefs, exportedAt } = {}) {
   const normPrefs = normalizePrefs(prefs);
   const store = stampScope(sanitizeStore(srs), normPrefs.examVersion);
   const when = typeof exportedAt === "string" && exportedAt.trim() ? exportedAt : new Date().toISOString();
@@ -423,6 +579,7 @@ export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes
       .sort((a, b) => (b.at || 0) - (a.at || 0) || a.id.localeCompare(b.id))
       .slice(0, RECENT_CAP),
     notes: sanitizeNotes(notes),
+    inbox: sanitizeInbox(inbox),
     pbq: sanitizePbqProgress(pbq),
     prefs: normPrefs,
   };
@@ -431,7 +588,7 @@ export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes
 export function coerceToBundle(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw progressError("malformed");
   const legacy = !hasOwn(raw, "version") && raw.cards && typeof raw.cards === "object";
-  const versioned = raw.version === PROGRESS_VERSION && ["srs", "mockHistory", "bookmarks", "recent", "prefs", "notes", "pbq"].some((k) => hasOwn(raw, k));
+  const versioned = raw.version === PROGRESS_VERSION && ["srs", "mockHistory", "bookmarks", "recent", "prefs", "notes", "inbox", "pbq"].some((k) => hasOwn(raw, k));
   if (!legacy && !versioned) throw progressError("malformed");
   if (raw.version != null && raw.version !== PROGRESS_VERSION && !legacy) throw progressError("malformed");
   const prefs = sanitizePrefs(legacy ? {} : raw.prefs);
@@ -444,6 +601,7 @@ export function coerceToBundle(raw) {
     bookmarks: legacy ? [] : sanitizeBookmarks(raw.bookmarks),
     recent: legacy ? [] : sanitizeRecent(raw.recent),
     notes: legacy ? {} : sanitizeNotes(raw.notes),
+    inbox: legacy || !hasOwn(raw, "inbox") ? [] : sanitizeInbox(raw.inbox),
     pbq: legacy || !hasOwn(raw, "pbq") ? {} : sanitizePbqProgress(raw.pbq),
     prefs,
     has: {
@@ -452,6 +610,7 @@ export function coerceToBundle(raw) {
       bookmarks: !legacy && hasOwn(raw, "bookmarks"),
       recent: !legacy && hasOwn(raw, "recent"),
       notes: !legacy && hasOwn(raw, "notes"),
+      inbox: !legacy && hasOwn(raw, "inbox"),
       pbq: !legacy && hasOwn(raw, "pbq"),
       prefs: !legacy && hasOwn(raw, "prefs"),
     },
@@ -470,6 +629,10 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
   const notes = incoming.has?.notes === false
     ? local.notes
     : (replace ? incoming.notes : mergeNotes(local.notes, incoming.notes));
+  // A file written before the inbox existed has no `inbox` field. Leave local captures alone.
+  const inbox = incoming.has?.inbox
+    ? (replace ? incoming.inbox : mergeInbox(local.inbox, incoming.inbox))
+    : local.inbox;
   // A file written before PBQs existed has no `pbq` field. Leave the local map alone.
   const pbq = incoming.has?.pbq
     ? (replace ? incoming.pbq : mergePbqProgress(local.pbq, incoming.pbq))
@@ -483,6 +646,7 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
       bookmarks: incoming.has?.bookmarks ? incoming.bookmarks : local.bookmarks,
       recent: incoming.has?.recent ? incoming.recent : local.recent,
       notes,
+      inbox,
       pbq,
       prefs,
     });
@@ -495,6 +659,7 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
     bookmarks: mergeBookmarks(local.bookmarks, incoming.bookmarks),
     recent: mergeRecent(local.recent, incoming.recent),
     notes,
+    inbox,
     pbq,
     prefs,
   });
@@ -565,6 +730,7 @@ export function collectProgress(storage, { srs, theme, examVersion } = {}) {
     bookmarks: loadBookmarks(storage),
     recent: loadRecent(storage),
     notes: loadNotes(storage),
+    inbox: loadInbox(storage),
     pbq: loadPbqProgress(storage),
     prefs,
   });
@@ -578,6 +744,7 @@ export function writeProgress(storage, bundle) {
   storage.setItem(BOOKMARKS_KEY, JSON.stringify(safe.bookmarks));
   storage.setItem(RECENT_KEY, JSON.stringify(safe.recent));
   saveNotes(safe.notes, storage);
+  saveInbox(safe.inbox, storage);
   savePbqProgress(safe.pbq, storage);
   if (safe.prefs.theme) storage.setItem(THEME_KEY, safe.prefs.theme);
   if (safe.prefs.viewMode) storage.setItem(VIEW_MODE_KEY, safe.prefs.viewMode);

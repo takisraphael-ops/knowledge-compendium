@@ -22,25 +22,39 @@ import {
 import { buildBacklinkIndex, extractOutgoingIds } from "../js/backlinks.js";
 import {
   BOOKMARKS_KEY,
+  INBOX_KEY,
   MOCK_HISTORY_KEY,
   NOTES_KEY,
   PASS_PCT,
+  addInboxItem,
   appendMockAttempt,
   buildProgressBundle,
   collectProgress,
   encryptProgress,
+  inboxToJson,
+  inboxToMarkdown,
   mergeHistory,
+  mergeInbox,
   mergeNotes,
   mergeProgress,
   pickMockQuestions,
   preferSrsCard,
   readProgressPayload,
+  removeInboxItem,
+  sanitizeInbox,
   sanitizeNotes,
+  updateInboxItem,
   upsertNote,
   weakestDomain,
   weakestDomainFromHistory,
   writeProgress,
 } from "../js/progress.js";
+import {
+  createSearchIndex,
+  nodeIdFromCardId,
+  patchSearchNote,
+  searchTopics,
+} from "../js/search.js";
 import { boxesOverlap, layoutMap, assignSides, assignSidesRight } from "../js/layout.js";
 import {
   buildIndex,
@@ -649,21 +663,30 @@ const secretBundle = buildProgressBundle({
   bookmarks: ["secret-token-zxq"],
   recent: [{ id: "secret-token-zxq", at: 7 }],
   notes: { "secret-token-zxq": { text: "private scratch", updatedAt: 9 } },
+  inbox: [{
+    id: "in-secret",
+    text: "inbox-secret-token-qq",
+    createdAt: 3,
+    updatedAt: 4,
+    linkedNodeId: "secret-token-zxq",
+  }],
   prefs: { theme: "dark", viewMode: "map", autoFold: true, examVersion: "801" },
 });
 const envelope = await encryptProgress(progressKey, secretBundle);
 const envelopeText = JSON.stringify(envelope);
-check("encrypted export is an envelope", envelope.alg === "AES-GCM" && !envelopeText.includes("secret-token-zxq") && !envelopeText.includes("private scratch"));
+check("encrypted export is an envelope", envelope.alg === "AES-GCM" && !envelopeText.includes("secret-token-zxq") && !envelopeText.includes("private scratch") && !envelopeText.includes("inbox-secret-token-qq"));
 const decrypted = await readProgressPayload(envelopeText, progressKey);
 check(
   "encrypted round trip",
   decrypted.srs.cards["t:node:secret-token-zxq"].reps === 6 &&
   decrypted.bookmarks.includes("secret-token-zxq") &&
   decrypted.mockHistory[0].id === "enc-1" &&
-  decrypted.notes["secret-token-zxq"].text === "private scratch"
+  decrypted.notes["secret-token-zxq"].text === "private scratch" &&
+  decrypted.inbox[0].text === "inbox-secret-token-qq" &&
+  decrypted.inbox[0].linkedNodeId === "secret-token-zxq"
 );
 const plainRead = await readProgressPayload(JSON.stringify(secretBundle), null);
-check("plain json import", plainRead.srs.cards["t:node:secret-token-zxq"].reps === 6 && plainRead.prefs.theme === "dark" && plainRead.notes["secret-token-zxq"].updatedAt === 9);
+check("plain json import", plainRead.srs.cards["t:node:secret-token-zxq"].reps === 6 && plainRead.prefs.theme === "dark" && plainRead.notes["secret-token-zxq"].updatedAt === 9 && plainRead.inbox[0].text === "inbox-secret-token-qq");
 let badPass = "";
 try {
   const otherKey = await deriveKey("wrong passphrase", randomBytes(16), 1000, true);
@@ -1246,6 +1269,204 @@ const withMature = prioritizeDrillCards({
   includeMature: true,
 });
 check("objective drill can keep a mastered card after the weak ones", withMature.at(-1).id === "mature-ok" && withMature.length === 6);
+
+function searchFixture(nodes, notes) {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  return createSearchIndex({ byId, order: nodes.map((node) => node.id) }, notes || {});
+}
+
+const ranked = searchFixture([
+  { id: "body", title: "Cables", summary: "the alpha token is here in the summary" },
+  { id: "note", title: "Switches", summary: "layer two" },
+  { id: "contains", title: "The alpha protocol", summary: "unrelated" },
+  { id: "prefix", title: "alpha routing", summary: "unrelated" },
+  { id: "exact", title: "alpha", summary: "unrelated" },
+], { note: { text: "remember alpha for the exam", updatedAt: 5 } });
+const alphaHits = searchTopics(ranked, { query: "alpha" });
+check("search ranks title, then note, then body", alphaHits.map((hit) => hit.id).join() === "exact,prefix,contains,note,body");
+check(
+  "search snippet and My note flag come from the personal note",
+  alphaHits.find((hit) => hit.id === "note").field === "note" &&
+  alphaHits.find((hit) => hit.id === "note").noteMatch === true &&
+  alphaHits.find((hit) => hit.id === "note").snippet.match.toLowerCase() === "alpha"
+);
+check(
+  "search snippet comes from body text when the title misses",
+  alphaHits.find((hit) => hit.id === "body").field === "body" &&
+  alphaHits.find((hit) => hit.id === "body").noteMatch === false &&
+  alphaHits.find((hit) => hit.id === "body").snippet.match.toLowerCase() === "alpha" &&
+  alphaHits.find((hit) => hit.id === "exact").field === "title" &&
+  !alphaHits.find((hit) => hit.id === "exact").snippet
+);
+const titledNote = searchTopics(searchFixture(
+  [{ id: "t", title: "alpha", summary: "x" }],
+  { t: { text: "alpha in my note", updatedAt: 1 } }
+), { query: "alpha" })[0];
+check(
+  "title match still flags a personal-note hit",
+  titledNote.field === "title" && titledNote.rank === 0 && titledNote.noteMatch === true && titledNote.snippet.match.toLowerCase() === "alpha"
+);
+const fieldHits = searchTopics(searchFixture([
+  { id: "tidy", title: "One", summary: "", tidy: "tidied zephyr wording" },
+  { id: "exp", title: "Two", summary: "", expanded: "expanded zephyr layer" },
+  { id: "mfa", title: "Login", summary: "", keyTerms: [{ term: "MFA", def: "two different factor types" }] },
+]), { query: "zephyr" });
+check("search matches tidy and expanded text", fieldHits.map((hit) => hit.id).sort().join() === "exp,tidy" && fieldHits.every((hit) => hit.snippet.match.toLowerCase() === "zephyr"));
+check("search matches key terms", searchTopics(searchFixture([
+  { id: "mfa", title: "Login", summary: "", keyTerms: [{ term: "MFA", def: "two different factor types" }] },
+]), { query: "factor types" })[0].id === "mfa");
+const live = searchFixture([{ id: "n", title: "Plain", summary: "nothing" }], {});
+check("search misses a note until it is patched", searchTopics(live, { query: "scratchpad" }).length === 0);
+patchSearchNote(live, "n", "my scratchpad idea", 4);
+const patched = searchTopics(live, { query: "scratchpad" });
+check("patched My note is searchable", patched.length === 1 && patched[0].noteMatch && patched[0].field === "note");
+patchSearchNote(live, "n", "   ", 5);
+check("clearing My note drops it from the note filter", searchTopics(live, { filter: "note" }).length === 0);
+const filt = searchFixture([
+  { id: "a", title: "Alpha", summary: "one" },
+  { id: "b", title: "Beta", summary: "two" },
+  { id: "c", title: "Gamma", summary: "three" },
+], { a: { text: "scratch", updatedAt: 2 }, c: { text: "later note", updatedAt: 9 } });
+check("empty query with All returns nothing", searchTopics(filt, { query: "" }).length === 0);
+check("Has note lists annotated topics newest first", searchTopics(filt, { filter: "note" }).map((hit) => hit.id).join() === "c,a");
+check("Bookmarked keeps bookmark order", searchTopics(filt, { filter: "bookmark", bookmarks: ["b", "a"] }).map((hit) => hit.id).join() === "b,a");
+check("Due lists only due topics", searchTopics(filt, { filter: "due", dueIds: ["c"] }).map((hit) => hit.id).join() === "c");
+check("Has note still requires the query", searchTopics(filt, { filter: "note", query: "beta" }).length === 0 && searchTopics(filt, { filter: "note", query: "alpha" }).map((hit) => hit.id).join() === "a");
+check("Bookmarked query drops other titles", searchTopics(filt, { filter: "bookmark", bookmarks: ["b"], query: "alpha" }).length === 0);
+check(
+  "doc filter narrows search",
+  searchTopics(searchFixture([{ id: "keep", title: "Alpha keep" }, { id: "drop", title: "Alpha drop" }]), { query: "alpha", docKeep: new Set(["keep"]) }).map((hit) => hit.id).join() === "keep"
+);
+const acr = searchFixture([
+  { id: "acids", title: "Acids", summary: "chemistry" },
+  { id: "ids", title: "IDS", summary: "intrusion" },
+  { id: "mac", title: "Machine", summary: "device" },
+  { id: "addr", title: "MAC address", summary: "layer two" },
+]);
+check("short queries match tokens, not substrings", searchTopics(acr, { query: "ids" }).map((hit) => hit.id).join() === "ids" && searchTopics(acr, { query: "mac" }).map((hit) => hit.id).join() === "addr");
+check(
+  "card id maps back to a topic",
+  nodeIdFromCardId("q:c48:1") === "c48" && nodeIdFromCardId("t:nrt-ospf:hello") === "nrt-ospf" && nodeIdFromCardId("k:c12") === "c12" && nodeIdFromCardId("nope") === ""
+);
+
+const corpus = [];
+for (let i = 0; i < 2400; i++) {
+  corpus.push({
+    id: `n${i}`,
+    title: `Topic ${i} signal`,
+    summary: `Summary ${i} about packets and routing`,
+    text: `${"body ".repeat(30)}${i === 1234 ? "unique-zephyr-token" : "plain"}`,
+    expanded: `Expanded ${i} explanation of the control plane`,
+  });
+}
+const corpusIndex = searchFixture(corpus, { n50: { text: "personal annotation zephyr-note", updatedAt: 1 } });
+searchTopics(corpusIndex, { query: "signal" });
+const samples = [];
+for (let i = 0; i < 5; i++) {
+  const t0 = performance.now();
+  searchTopics(corpusIndex, { query: "signal" });
+  samples.push(performance.now() - t0);
+}
+samples.sort((a, b) => a - b);
+const zephyr = searchTopics(corpusIndex, { query: "unique-zephyr-token" });
+const noted = searchTopics(corpusIndex, { query: "zephyr-note" });
+check(
+  `search 2400 nodes in ${samples[0].toFixed(1)}ms`,
+  zephyr.length === 1 && zephyr[0].id === "n1234" && noted.length === 1 && noted[0].noteMatch && samples[0] < 20
+);
+
+const ibox = memoryStorage();
+let inboxItems = addInboxItem(ibox, { id: "in-a", text: "  first thought  ", linkedNodeId: "c1", now: 10 });
+check("inbox add trims text and keeps the topic link", inboxItems.length === 1 && inboxItems[0].text === "first thought" && inboxItems[0].linkedNodeId === "c1" && inboxItems[0].createdAt === 10 && inboxItems[0].updatedAt === 10 && ibox.getItem(INBOX_KEY).includes("in-a"));
+inboxItems = addInboxItem(ibox, { id: "in-b", text: "second thought", now: 20 });
+check("inbox lists newest first", loadIds(ibox) === "in-b,in-a");
+addInboxItem(ibox, { id: "in-c", text: "no link", linkedNodeId: "bad id", now: 15 });
+check("inbox drops an invalid topic link", !inboxItems.find((item) => item.id === "in-c") && JSON.parse(ibox.getItem(INBOX_KEY)).find((item) => item.id === "in-c").linkedNodeId == null);
+const beforeBlank = JSON.parse(ibox.getItem(INBOX_KEY)).length;
+addInboxItem(ibox, { text: "   ", now: 16 });
+check("blank inbox capture is ignored", JSON.parse(ibox.getItem(INBOX_KEY)).length === beforeBlank);
+inboxItems = updateInboxItem(ibox, "in-a", { text: "edited thought" }, 30);
+check("inbox edit keeps the newer text first", inboxItems[0].id === "in-a" && inboxItems[0].text === "edited thought" && inboxItems[0].linkedNodeId === "c1");
+inboxItems = updateInboxItem(ibox, "in-a", { archived: true }, 40);
+check("inbox archive toggles the flag", inboxItems.find((item) => item.id === "in-a").archived === true);
+inboxItems = updateInboxItem(ibox, "in-a", { text: "   " }, 50);
+check("empty inbox edit deletes the capture", !inboxItems.some((item) => item.id === "in-a"));
+inboxItems = removeInboxItem(ibox, "in-b");
+check("inbox delete removes one capture", !inboxItems.some((item) => item.id === "in-b") && inboxItems.some((item) => item.id === "in-c"));
+removeInboxItem(ibox, "in-c");
+check("empty inbox removes its storage key", ibox.getItem(INBOX_KEY) == null);
+check(
+  "inbox sanitize drops bad ids and caps at 400 newest",
+  sanitizeInbox([{ id: "bad id", text: "x", createdAt: 1, updatedAt: 1 }, { id: "in-ok", text: "  ", createdAt: 1, updatedAt: 1 }]).length === 0 &&
+  sanitizeInbox(Array.from({ length: 401 }, (_, i) => ({ id: `in-${i}`, text: `t${i}`, createdAt: i, updatedAt: i }))).length === 400 &&
+  sanitizeInbox(Array.from({ length: 401 }, (_, i) => ({ id: `in-${i}`, text: `t${i}`, createdAt: i, updatedAt: i })))[0].id === "in-400"
+);
+const mergedInbox = mergeInbox(
+  [{ id: "in-1", text: "local", createdAt: 1, updatedAt: 10 }, { id: "in-2", text: "stay", createdAt: 1, updatedAt: 5 }],
+  [{ id: "in-1", text: "incoming", createdAt: 1, updatedAt: 20 }, { id: "in-2", text: "older", createdAt: 1, updatedAt: 4 }, { id: "in-3", text: "added", createdAt: 2, updatedAt: 6 }]
+);
+check("inbox merge keeps the newer text", mergedInbox.find((item) => item.id === "in-1").text === "incoming" && mergedInbox.find((item) => item.id === "in-2").text === "stay" && mergedInbox.some((item) => item.id === "in-3"));
+check("inbox merge tie keeps the local copy", mergeInbox(
+  [{ id: "in-1", text: "local", createdAt: 1, updatedAt: 5 }],
+  [{ id: "in-1", text: "other", createdAt: 1, updatedAt: 5 }]
+)[0].text === "local");
+const md = inboxToMarkdown([{
+  id: "in-1",
+  text: "remember the CAM table",
+  createdAt: Date.parse("2026-11-27T00:00:00.000Z"),
+  updatedAt: Date.parse("2026-11-27T00:00:00.000Z"),
+  linkedNodeId: "nrt-ospf",
+}], { "nrt-ospf": "OSPF" });
+check("inbox markdown names the linked topic", md.includes("## Open") && md.includes("remember the CAM table") && md.includes("OSPF") && md.includes("`nrt-ospf`") && md.includes("## Archived"));
+check("inbox json round trip", JSON.parse(inboxToJson([{ id: "in-1", text: "batch", createdAt: 1, updatedAt: 2 }])).inbox[0].text === "batch");
+
+const withInbox = buildProgressBundle({
+  inbox: [{ id: "in-keep", text: "keep me", createdAt: 1, updatedAt: 5 }],
+  bookmarks: ["c1"],
+});
+const olderProgress = {
+  version: 1,
+  exportedAt: "2026-01-01T00:00:00.000Z",
+  srs: withInbox.srs,
+  mockHistory: [],
+  bookmarks: ["c9"],
+  recent: [],
+  notes: {},
+  prefs: withInbox.prefs,
+};
+const keptInbox = mergeProgress(withInbox, olderProgress, { replace: false });
+const keptInboxReplace = mergeProgress(withInbox, olderProgress, { replace: true });
+check(
+  "older progress file without inbox leaves local captures",
+  keptInbox.inbox.length === 1 && keptInbox.inbox[0].text === "keep me" && keptInboxReplace.inbox[0].text === "keep me"
+);
+const mixedInbox = mergeProgress(withInbox, buildProgressBundle({
+  inbox: [
+    { id: "in-keep", text: "newer", createdAt: 1, updatedAt: 9 },
+    { id: "in-add", text: "added", createdAt: 2, updatedAt: 3 },
+  ],
+}), { replace: false });
+check(
+  "progress merge combines inbox captures by id",
+  mixedInbox.inbox.find((item) => item.id === "in-keep").text === "newer" && mixedInbox.inbox.some((item) => item.id === "in-add")
+);
+const replacedInbox = mergeProgress(withInbox, buildProgressBundle({
+  inbox: [{ id: "in-new", text: "only incoming", createdAt: 1, updatedAt: 2 }],
+}), { replace: true });
+check("progress replace takes the incoming inbox", replacedInbox.inbox.length === 1 && replacedInbox.inbox[0].id === "in-new");
+
+const inboxStore = memoryStorage();
+addInboxItem(inboxStore, { id: "in-rt", text: "captured on device", linkedNodeId: "c1", now: 8 });
+check("collect progress reads the inbox", collectProgress(inboxStore).inbox[0].text === "captured on device" && collectProgress(inboxStore).inbox[0].linkedNodeId === "c1");
+const inboxOther = memoryStorage();
+writeProgress(inboxOther, collectProgress(inboxStore));
+check("write progress stores kc-inbox-v1", JSON.parse(inboxOther.getItem(INBOX_KEY))[0].id === "in-rt");
+writeProgress(inboxOther, buildProgressBundle({ inbox: [] }));
+check("writing an empty inbox removes the key", inboxOther.getItem(INBOX_KEY) == null);
+
+function loadIds(storage) {
+  return JSON.parse(storage.getItem(INBOX_KEY)).map((item) => item.id).join();
+}
 
 if (failed) {
   console.error(`${failed} failed`);

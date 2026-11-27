@@ -31,7 +31,6 @@ import {
   normalizeNode,
   orphanIds,
   safeUrl,
-  searchBlob,
   subtreeIds,
   wouldCycle,
 } from "./model.js";
@@ -39,16 +38,30 @@ import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTer
 import { buildBacklinkIndex } from "./backlinks.js";
 import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise, getReviseStore, reloadReviseFromStorage, applyImportedExamVersion, currentExamVersion } from "./revise.js";
 import { collectTermsForNode, keyPointsOf, parsePracticePairs } from "./cards.js";
+import { isDue } from "./schedule.js";
 import {
+  createSearchIndex,
+  nodeIdFromCardId,
+  patchSearchNote,
+  searchTopics,
+} from "./search.js";
+import {
+  addInboxItem,
   cleanId,
   collectProgress,
   encryptProgress,
+  inboxToJson,
+  inboxToMarkdown,
   isEncryptedEnvelope,
+  loadInbox,
   loadMockHistory,
   loadNotes,
   mergeProgress,
+  openInboxCount,
   pushRecent,
   readProgressPayload,
+  removeInboxItem,
+  updateInboxItem,
   upsertNote,
   writeProgress,
 } from "./progress.js";
@@ -116,6 +129,9 @@ const els = {
   count: $("count"),
   search: $("search"),
   searchResults: $("search-results"),
+  inboxBtn: $("inbox-btn"),
+  inboxCount: $("inbox-count"),
+  inbox: $("inbox"),
   matchLabel: $("match-label"),
   docFilter: $("doc-filter"),
   editsBtn: $("edits-btn"),
@@ -153,7 +169,7 @@ const state = {
   baseNodes: [],
   edits: emptyEdits(),
   index: null,
-  blobs: new Map(),
+  searchIndex: null,
   baseById: new Map(),
   sides: new Map(),
   colors: new Map(),
@@ -165,6 +181,9 @@ const state = {
   showOriginal: false,
   sections: {},
   query: "",
+  searchFilter: "all",
+  dropdownHits: [],
+  dueNodeIds: new Set(),
   hits: [],
   hitCursor: 0,
   doc: "",
@@ -197,6 +216,9 @@ let toastTimer = 0;
 let searchTimer = 0;
 let noteTimer = 0;
 let noteDraft = null;
+let inboxOpen = false;
+let inboxShowArchived = false;
+let inboxEditingId = null;
 const NOTE_SAVE_MS = 400;
 let measureCtx = null;
 let routeApplying = false;
@@ -389,8 +411,6 @@ function rebuildDerived() {
   const nodes = materialize(state.baseNodes, state.edits);
   state.index = buildIndex(nodes);
   state.baseById = new Map(state.baseNodes.map((n) => [String(n.id), normalizeNode(n)]));
-  state.blobs = new Map();
-  for (const [id, node] of state.index.byId) state.blobs.set(id, searchBlob(node));
   state.sides = assignSides(state.index.rootId, state.index.children);
   state.colors = new Map();
   const level1 = state.index.children.get(state.index.rootId) || [];
@@ -410,6 +430,7 @@ function rebuildDerived() {
   setAbbrIndex(buildAbbrIndex(state.index, { subjects: state.subjects, nodeBranch: state.nodeBranch }));
   buildGlossary(state.index, { subjects: state.subjects, nodeBranch: state.nodeBranch });
   rebuildBacklinks();
+  rebuildSearchIndex();
 }
 
 function branchInfo(nodeId) {
@@ -591,7 +612,7 @@ function drawNodes() {
     btn.classList.toggle("match", hits.has(id));
     btn.classList.toggle("current", id === current);
     btn.classList.toggle("edited", touched.has(id));
-    btn.classList.toggle("dim", state.query.length >= 2 && !hits.has(id) && !state.hitAncestors.has(id));
+    btn.classList.toggle("dim", state.query.trim().length >= 2 && !hits.has(id) && !state.hitAncestors.has(id));
     btn.classList.toggle("path-dim", Boolean(pathKeep) && !pathKeep.has(id));
     btn.style.left = `${pos.x}px`;
     btn.style.top = `${pos.y}px`;
@@ -1402,6 +1423,7 @@ function toggleBookmark(id) {
   const next = cur.includes(id) ? cur.filter((x) => x !== id) : [id, ...cur].slice(0, 200);
   writeStoredIds(BOOKMARKS_KEY, next);
   renderPanel();
+  refreshSearchIfActive();
   if (els.overviewGrid) els.overviewGrid.dataset.key = "";
   if (state.mode === "overview") renderOverview();
 }
@@ -1679,47 +1701,73 @@ function expandSubtree(id) {
   draw();
 }
 
-function isAcronymAwareQuery(raw) {
-  const t = String(raw || "").trim();
-  if (t.length < 2) return false;
-  // ALL-CAPS tokens such as IDS, SIEM, TCP/IP.
-  if (/^[A-Z0-9][A-Z0-9/+\-]{1,11}$/.test(t) && /[A-Z]/.test(t)) return true;
-  // Short letter queries ("ids", "mac") should not match inside acids/machine.
-  if (t.length <= 4 && /^[A-Za-z][A-Za-z0-9]*$/.test(t)) return true;
-  return false;
+function searchIsActive() {
+  return state.query.trim().length >= 2 || state.searchFilter !== "all";
 }
 
-function blobHasQuery(blob, q, acronymAware) {
-  if (!q) return false;
-  if (!acronymAware) return blob.includes(q);
-  const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp("(^|[^a-z0-9])" + escaped + "([^a-z0-9]|$)", "i").test(blob);
+function refreshDueNodes() {
+  const ids = new Set();
+  if (!state.index) {
+    state.dueNodeIds = ids;
+    return;
+  }
+  let store = null;
+  try { store = getReviseStore(); } catch { store = null; }
+  const now = Date.now();
+  for (const [cardId, rec] of Object.entries(store?.cards || {})) {
+    if (!isDue(rec, now)) continue;
+    const nodeId = nodeIdFromCardId(cardId);
+    if (nodeId && state.index.byId.has(nodeId)) ids.add(nodeId);
+  }
+  state.dueNodeIds = ids;
+}
+
+function rebuildSearchIndex() {
+  if (!state.index) {
+    state.searchIndex = null;
+    state.dueNodeIds = new Set();
+    return;
+  }
+  let notes = {};
+  try { notes = { ...loadNotes(localStorage) }; } catch { notes = {}; }
+  if (noteDraft?.id) {
+    const text = String(noteDraft.text || "");
+    if (text.trim()) notes[noteDraft.id] = { text, updatedAt: notes[noteDraft.id]?.updatedAt || Date.now() };
+    else delete notes[noteDraft.id];
+  }
+  state.searchIndex = createSearchIndex(state.index, notes);
+  refreshDueNodes();
+}
+
+function refreshSearchIfActive() {
+  if (!searchIsActive()) return;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch({ focus: false }), 140);
 }
 
 function runSearch(options = {}) {
+  if (!state.index) {
+    state.dropdownHits = [];
+    state.hits = [];
+    state.hitAncestors = new Set();
+    renderSearchDropdown();
+    return;
+  }
   const raw = state.query.trim();
-  const q = raw.toLowerCase();
-  const acronymAware = isAcronymAwareQuery(raw);
-  state.hits = [];
+  const results = state.searchIndex
+    ? searchTopics(state.searchIndex, {
+      query: raw,
+      filter: state.searchFilter,
+      bookmarks: readStoredIds(BOOKMARKS_KEY),
+      dueIds: state.dueNodeIds,
+      docKeep: state.filter,
+    })
+    : [];
+  state.dropdownHits = results;
+  const textSearch = raw.length >= 2;
+  state.hits = textSearch ? results.map((hit) => hit.id) : [];
   state.hitAncestors = new Set();
-  if (q.length >= 2) {
-    for (const id of state.index.order) {
-      if (state.filter && !state.filter.has(id) && id !== state.index.rootId) continue;
-      const blob = state.blobs.get(id) || "";
-      if (blobHasQuery(blob, q, acronymAware)) state.hits.push(id);
-    }
-    const rank = (id) => {
-      const node = state.index.byId.get(id);
-      const title = (node?.title || "").toLowerCase();
-      if (title === q) return 0;
-      if (title.startsWith(q)) return 1;
-      if (title.includes(q)) return 2;
-      const summary = (node?.summary || "").toLowerCase();
-      if (summary.includes(q)) return 3;
-      return 4;
-    };
-    const orderIndex = new Map(state.index.order.map((id, i) => [id, i]));
-    state.hits.sort((a, b) => rank(a) - rank(b) || (orderIndex.get(a) ?? 0) - (orderIndex.get(b) ?? 0));
+  if (textSearch && state.index) {
     for (const id of state.hits) {
       for (const a of ancestorIds(state.index, id)) {
         state.expanded.add(a);
@@ -1729,7 +1777,7 @@ function runSearch(options = {}) {
   }
   state.hitCursor = 0;
   const n = state.hits.length;
-  els.matchLabel.textContent = q.length < 2 ? "" : n ? `1 / ${n}` : "No matches";
+  els.matchLabel.textContent = !textSearch ? "" : n ? `1 / ${n}` : "No matches";
   if (n && options.focus !== false) {
     openNode(state.hits[0], { push: true });
     if (state.cam.k < 0.72) {
@@ -1753,34 +1801,65 @@ function markCurrentHit() {
 
 function hideSearchDropdown() {
   if (els.searchResults) els.searchResults.hidden = true;
+  els.search?.setAttribute("aria-expanded", "false");
+}
+
+function dropdownLimit() {
+  return state.query.trim().length >= 2 ? 12 : 40;
+}
+
+function visibleDropdownHits() {
+  return (state.dropdownHits || []).slice(0, dropdownLimit());
+}
+
+const SEARCH_FILTERS = [
+  { id: "all", label: "All" },
+  { id: "note", label: "Has note" },
+  { id: "bookmark", label: "Bookmarked" },
+  { id: "due", label: "Due" },
+];
+
+function snippetHtml(snippet) {
+  if (!snippet) return "";
+  return `<span class="sr-snip">${escapeHtml(snippet.before)}<mark class="sr-mark">${escapeHtml(snippet.match)}</mark>${escapeHtml(snippet.after)}</span>`;
 }
 
 function renderSearchDropdown() {
   const box = els.searchResults;
   if (!box) return;
   const q = state.query.trim();
-  if (q.length < 2 || !state.hits.length) {
-    box.hidden = true;
-    box.innerHTML = "";
-    return;
-  }
-  const limit = 12;
-  const slice = state.hits.slice(0, limit);
-  const rows = slice.map((id, i) => {
-    const node = state.index.byId.get(id);
-    if (!node) return "";
-    const sub = subjectOfNode(state.index, state.subjects, id);
-    const badge = sub ? `<span class="sr-badge">${escapeHtml(sub.title)}</span>` : "";
-    const sum = (node.summary || "").trim();
-    const snip = sum ? `<span class="sr-snip">${escapeHtml(sum.slice(0, 110))}${sum.length > 110 ? "…" : ""}</span>` : "";
-    const active = i === state.hitCursor ? " active" : "";
-    return `<button type="button" class="sr-item${active}" role="option" aria-selected="${i === state.hitCursor}" data-sr-index="${i}" data-sr-id="${escapeHtml(id)}"><span class="sr-top"><span class="sr-title">${escapeHtml(node.title)}</span>${badge}</span>${snip}</button>`;
+  const filters = SEARCH_FILTERS.map((item) => {
+    const on = state.searchFilter === item.id;
+    return `<button type="button" class="sr-pill${on ? " on" : ""}" data-sr-filter="${item.id}" aria-pressed="${on ? "true" : "false"}">${item.label}</button>`;
   }).join("");
-  const more = state.hits.length > limit
-    ? `<div class="sr-more">${state.hits.length - limit} more — use ‹ / › to step through all matches</div>`
+  const limit = dropdownLimit();
+  const hits = state.dropdownHits || [];
+  const slice = hits.slice(0, limit);
+  const rows = slice.map((hit, i) => {
+    const node = state.index?.byId.get(hit.id);
+    if (!node) return "";
+    const sub = subjectOfNode(state.index, state.subjects, hit.id);
+    const subject = sub ? `<span class="sr-badge">${escapeHtml(sub.title)}</span>` : "";
+    const mine = hit.noteMatch ? `<span class="sr-badge sr-note">My note</span>` : "";
+    const sum = (node.summary || "").trim();
+    const snip = hit.snippet
+      ? snippetHtml(hit.snippet)
+      : sum
+        ? `<span class="sr-snip">${escapeHtml(sum.slice(0, 110))}${sum.length > 110 ? "…" : ""}</span>`
+        : "";
+    const active = i === state.hitCursor;
+    return `<button type="button" class="sr-item${active ? " active" : ""}" role="option" aria-selected="${active ? "true" : "false"}" data-sr-index="${i}" data-sr-id="${escapeHtml(hit.id)}"><span class="sr-top"><span class="sr-title">${highlightTitle(node.title, q)}</span><span class="sr-badges">${mine}${subject}</span></span>${snip}</button>`;
+  }).join("");
+  const more = hits.length > limit
+    ? `<div class="sr-more">${hits.length - limit} more${q.length >= 2 ? " — use ‹ / › to step through all matches" : ""}</div>`
     : "";
-  box.innerHTML = rows + more;
-  box.hidden = document.activeElement !== els.search;
+  const empty = rows
+    ? ""
+    : `<p class="sr-empty">${q.length >= 2 ? "No matches" : state.searchFilter === "all" ? "Type at least 2 letters, or choose a filter." : "Nothing in this filter."}</p>`;
+  box.innerHTML = `<div class="sr-filters" role="group" aria-label="Filter topics">${filters}</div><div class="sr-list" role="listbox" aria-label="Search results">${rows}</div>${empty}${more}`;
+  const open = document.activeElement === els.search;
+  box.hidden = !open;
+  els.search?.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 function stepHit(dir) {
@@ -1937,8 +2016,10 @@ function schedulePersonalNote(id, text) {
   if (status) status.textContent = "";
   const section = $("panel-my-notes");
   if (section) section.classList.toggle("is-empty", !String(text || "").trim());
+  patchSearchNote(state.searchIndex, id, text, Date.now());
   clearTimeout(noteTimer);
   noteTimer = setTimeout(() => flushPersonalNote(), NOTE_SAVE_MS);
+  refreshSearchIfActive();
 }
 
 function flushPersonalNote() {
@@ -1947,8 +2028,14 @@ function flushPersonalNote() {
   if (!noteDraft) return;
   const { id, text } = noteDraft;
   try {
-    upsertNote(localStorage, id, text);
+    const saved = upsertNote(localStorage, id, text);
+    const rec = saved[cleanId(id)];
+    patchSearchNote(state.searchIndex, id, rec?.text || "", rec?.updatedAt || 0);
+    refreshSearchIfActive();
   } catch {
+    const kept = savedNote(id);
+    patchSearchNote(state.searchIndex, id, kept?.text || "", kept?.updatedAt || 0);
+    refreshSearchIfActive();
     if (state.selected === id) {
       const status = $("my-notes-status");
       if (status) status.textContent = "Not saved";
@@ -2446,9 +2533,10 @@ async function confirmDiscard() {
 
 function refresh() {
   rebuildDerived();
-  if (state.query.trim().length >= 2) runSearch({ focus: false });
+  if (searchIsActive()) runSearch({ focus: false });
   else {
     state.hits = [];
+    state.dropdownHits = [];
     draw();
   }
   renderPanel();
@@ -2473,8 +2561,8 @@ function toast(message) {
   }, 3400);
 }
 
-function downloadText(filename, text) {
-  const blob = new Blob([text], { type: "application/json" });
+function downloadText(filename, text, type = "application/json") {
+  const blob = new Blob([text], { type });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = filename;
@@ -2550,7 +2638,7 @@ async function importStudyProgressFile(file) {
     return;
   }
   if (!window.confirm("Import this study progress file?")) return;
-  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, mock history, bookmarks, and recent topics are combined, each personal note keeps the newest edit, and each PBQ keeps its higher score.");
+  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, mock history, bookmarks, and recent topics are combined, each personal note keeps the newest edit, each inbox capture keeps the newer edit, and each PBQ keeps its higher score.");
   try {
     if (replace) discardPersonalNoteDraft();
     else flushPersonalNote();
@@ -2559,7 +2647,10 @@ async function importStudyProgressFile(file) {
     writeProgress(localStorage, merged);
     applyImportedPrefs(merged.prefs);
     reloadReviseFromStorage();
+    rebuildSearchIndex();
     refreshDueBadge();
+    paintInboxBadge();
+    if (inboxOpen) renderInbox();
     if (state.index) renderPanel();
     toast(replace ? "Study progress replaced from the file." : "Study progress merged from the file.");
   } catch (err) {
@@ -2669,7 +2760,7 @@ function onPanelClick(e) {
     state.filter = idsPassingDocFilter(state.index, state.doc);
     els.docFilter.value = state.doc;
     draw();
-    if (state.query.trim().length >= 2) runSearch({ focus: false });
+    if (searchIsActive()) runSearch({ focus: false });
   }
 }
 
@@ -3064,9 +3155,264 @@ function paintDueBadge() {
 function refreshDueBadge({ redrawOverview = true } = {}) {
   state.dueCount = getDueCount();
   paintDueBadge();
+  refreshDueNodes();
+  if (state.searchFilter === "due") refreshSearchIfActive();
   if (redrawOverview && state.mode === "overview" && els.overviewGrid) {
     els.overviewGrid.dataset.key = "";
     renderOverview();
+  }
+}
+
+function paintInboxBadge() {
+  const badge = els.inboxCount;
+  const btn = els.inboxBtn;
+  if (!badge || !btn) return;
+  let n = 0;
+  try { n = openInboxCount(loadInbox(localStorage)); } catch { n = 0; }
+  if (n > 0) {
+    badge.hidden = false;
+    badge.textContent = n > 99 ? "99+" : String(n);
+    btn.setAttribute("aria-label", `Inbox, ${n} open`);
+  } else {
+    badge.hidden = true;
+    badge.textContent = "";
+    btn.setAttribute("aria-label", "Inbox");
+  }
+}
+
+function formatInboxWhen(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  try {
+    return new Date(n).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+function inboxTitleMap() {
+  const titles = {};
+  for (const item of loadInbox(localStorage)) {
+    if (!item.linkedNodeId) continue;
+    titles[item.linkedNodeId] = state.index?.byId.get(item.linkedNodeId)?.title || item.linkedNodeId;
+  }
+  return titles;
+}
+
+function inboxLinkHtml(id) {
+  if (!id) return "";
+  const node = state.index?.byId.get(id);
+  if (!node) return `<span class="inbox-topic missing">${escapeHtml(id)}</span>`;
+  return `<button type="button" class="inbox-topic" data-inbox="open" data-node="${escapeHtml(id)}">${escapeHtml(node.title || id)}</button>`;
+}
+
+function renderInbox() {
+  const root = els.inbox;
+  if (!root) return;
+  const items = loadInbox(localStorage).filter((item) => Boolean(item.archived) === inboxShowArchived);
+  const selected = state.selected && state.index?.byId.get(state.selected);
+  const linkRow = selected
+    ? `<label class="check inbox-link"><input type="checkbox" id="inbox-link" data-node-id="${escapeHtml(selected.id)}" checked> Tag with “${escapeHtml(selected.title || selected.id)}”</label>`
+    : "";
+  const rows = items.map((item) => {
+    const when = formatInboxWhen(item.updatedAt || item.createdAt);
+    const editing = inboxEditingId === item.id;
+    const body = editing
+      ? `<textarea class="inbox-edit" rows="3">${escapeHtml(item.text)}</textarea>`
+      : `<p class="inbox-item-text">${escapeHtml(item.text)}</p>`;
+    const actions = editing
+      ? `<button type="button" class="solid" data-inbox="save">Save</button><button type="button" data-inbox="cancel">Cancel</button>`
+      : `<button type="button" data-inbox="edit">Edit</button><button type="button" data-inbox="archive">${item.archived ? "Restore" : "Archive"}</button><button type="button" class="danger" data-inbox="delete">Delete</button>`;
+    return `<li class="inbox-item" data-id="${escapeHtml(item.id)}">${body}<div class="inbox-item-meta">${inboxLinkHtml(item.linkedNodeId)}${when ? `<time datetime="${escapeHtml(new Date(item.updatedAt || item.createdAt || 0).toISOString())}">${escapeHtml(when)}</time>` : ""}</div><div class="inbox-item-actions">${actions}</div></li>`;
+  }).join("");
+  const empty = rows
+    ? ""
+    : `<p class="inbox-empty">${inboxShowArchived ? "No archived captures." : "Nothing in the inbox yet."}</p>`;
+  root.innerHTML = `<div class="inbox-backdrop" data-inbox="close"></div>
+    <aside class="inbox-panel" role="dialog" aria-modal="true" aria-labelledby="inbox-title">
+      <header class="inbox-head">
+        <div>
+          <h2 id="inbox-title">Quick capture</h2>
+          <p class="inbox-hint">Jot a thought. Press n to open this inbox.</p>
+        </div>
+        <button type="button" class="icon-btn inbox-close" data-inbox="close" aria-label="Close inbox">×</button>
+      </header>
+      <form class="inbox-form" id="inbox-form">
+        <textarea id="inbox-text" class="inbox-text" rows="3" placeholder="A thought or a concept…" autocomplete="off"></textarea>
+        ${linkRow}
+        <div class="inbox-actions"><button type="submit" class="solid">Save</button></div>
+      </form>
+      <div class="inbox-toolbar">
+        <button type="button" class="sr-pill${inboxShowArchived ? " on" : ""}" data-inbox="archived" aria-pressed="${inboxShowArchived ? "true" : "false"}">Show archived</button>
+        <div class="inbox-export" role="group" aria-label="Copy / Export inbox">
+          <span class="inbox-export-label">Copy / Export inbox</span>
+          <button type="button" data-inbox="copy">Markdown</button>
+          <button type="button" data-inbox="download">JSON</button>
+        </div>
+      </div>
+      <ul class="inbox-list">${rows}</ul>
+      ${empty}
+    </aside>`;
+}
+
+function openInbox() {
+  if (!els.inbox || els.app?.hidden) return;
+  hideSearchDropdown();
+  inboxOpen = true;
+  inboxShowArchived = false;
+  inboxEditingId = null;
+  renderInbox();
+  els.inbox.hidden = false;
+  els.inboxBtn?.setAttribute("aria-expanded", "true");
+  document.body.classList.add("inbox-open");
+  $("inbox-text")?.focus();
+}
+
+function closeInbox({ focus = true } = {}) {
+  inboxOpen = false;
+  inboxEditingId = null;
+  if (els.inbox) {
+    els.inbox.hidden = true;
+    els.inbox.innerHTML = "";
+  }
+  document.body.classList.remove("inbox-open");
+  els.inboxBtn?.setAttribute("aria-expanded", "false");
+  if (focus) els.inboxBtn?.focus();
+}
+
+function inboxShortcut(e) {
+  if (e.key !== "n" || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.repeat) return false;
+  if (els.app?.hidden || inboxOpen || !els.modal?.hidden) return false;
+  if (isTypingTarget(document.activeElement)) return false;
+  e.preventDefault();
+  openInbox();
+  return true;
+}
+
+async function copyInboxExport() {
+  const md = inboxToMarkdown(loadInbox(localStorage), inboxTitleMap());
+  const day = new Date().toISOString().slice(0, 10);
+  try {
+    await navigator.clipboard.writeText(md);
+    toast("Inbox copied as Markdown.");
+  } catch {
+    downloadText(`kc-inbox-${day}.md`, md, "text/markdown;charset=utf-8");
+    toast("Markdown downloaded.");
+  }
+}
+
+function downloadInboxExport() {
+  const day = new Date().toISOString().slice(0, 10);
+  downloadText(`kc-inbox-${day}.json`, inboxToJson(loadInbox(localStorage)));
+  toast("Inbox JSON downloaded.");
+}
+
+function onInboxSubmit(e) {
+  e.preventDefault();
+  const text = $("inbox-text")?.value || "";
+  const link = $("inbox-link");
+  const linkedNodeId = link?.checked ? link.dataset.nodeId : "";
+  let saved;
+  try {
+    saved = addInboxItem(localStorage, { text, linkedNodeId: linkedNodeId || undefined });
+  } catch {
+    toast("Could not save that capture.");
+    return;
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    toast("Write a thought first.");
+    return;
+  }
+  if (!saved.length || saved.every((item) => item.text !== trimmed && item.text !== trimmed.slice(0, 8000).trim())) {
+    toast("Could not save that capture.");
+    return;
+  }
+  paintInboxBadge();
+  inboxShowArchived = false;
+  inboxEditingId = null;
+  renderInbox();
+  toast("Saved to the inbox.");
+  $("inbox-text")?.focus();
+}
+
+function onInboxClick(e) {
+  const btn = e.target.closest("[data-inbox]");
+  if (!btn || !els.inbox?.contains(btn)) return;
+  const act = btn.dataset.inbox;
+  if (act === "close") {
+    closeInbox();
+    return;
+  }
+  if (act === "archived") {
+    inboxShowArchived = !inboxShowArchived;
+    inboxEditingId = null;
+    renderInbox();
+    return;
+  }
+  if (act === "copy") {
+    copyInboxExport();
+    return;
+  }
+  if (act === "download") {
+    downloadInboxExport();
+    return;
+  }
+  const item = btn.closest(".inbox-item");
+  const id = item?.dataset.id || "";
+  if (act === "open") {
+    const nodeId = btn.dataset.node;
+    closeInbox({ focus: false });
+    if (nodeId) openNode(nodeId, { push: true });
+    return;
+  }
+  if (!id) return;
+  if (act === "edit") {
+    inboxEditingId = id;
+    renderInbox();
+    item && els.inbox.querySelector(`.inbox-item[data-id="${CSS.escape(id)}"] textarea`)?.focus();
+    return;
+  }
+  if (act === "cancel") {
+    inboxEditingId = null;
+    renderInbox();
+    return;
+  }
+  if (act === "save") {
+    const text = item.querySelector("textarea")?.value || "";
+    if (!text.trim()) {
+      toast("Write something to save the edit.");
+      return;
+    }
+    try { updateInboxItem(localStorage, id, { text }); } catch {
+      toast("Could not save that edit.");
+      return;
+    }
+    inboxEditingId = null;
+    paintInboxBadge();
+    renderInbox();
+    return;
+  }
+  if (act === "archive") {
+    const current = loadInbox(localStorage).find((row) => row.id === id);
+    try { updateInboxItem(localStorage, id, { archived: !current?.archived }); } catch {
+      toast("Could not update that capture.");
+      return;
+    }
+    inboxEditingId = null;
+    paintInboxBadge();
+    renderInbox();
+    return;
+  }
+  if (act === "delete") {
+    if (!window.confirm("Delete this capture?")) return;
+    try { removeInboxItem(localStorage, id); } catch {
+      toast("Could not delete that capture.");
+      return;
+    }
+    if (inboxEditingId === id) inboxEditingId = null;
+    paintInboxBadge();
+    renderInbox();
   }
 }
 
@@ -3088,6 +3434,24 @@ function wireChrome() {
   });
   setGlossaryOpener(({ key, branch }) => {
     openGlossary({ slug: key ? glossarySlug(key) : null, branch: branch || null, push: true });
+  });
+  paintInboxBadge();
+  els.inboxBtn?.addEventListener("click", () => {
+    if (inboxOpen) closeInbox();
+    else openInbox();
+  });
+  els.inbox?.addEventListener("click", onInboxClick);
+  els.inbox?.addEventListener("submit", onInboxSubmit);
+  els.inbox?.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    e.preventDefault();
+    if (inboxEditingId) {
+      inboxEditingId = null;
+      renderInbox();
+      return;
+    }
+    closeInbox();
   });
   els.reviseBtn?.addEventListener("click", () => {
     if (state.mode === "revise") {
@@ -3146,46 +3510,53 @@ function wireChrome() {
     searchTimer = setTimeout(() => runSearch(), 140);
   });
   els.search.addEventListener("focus", () => {
-    if (state.query.trim().length >= 2 && state.hits.length) renderSearchDropdown();
+    renderSearchDropdown();
   });
   els.search.addEventListener("keydown", (e) => {
-    if (!state.hits.length) return;
-    const maxVisible = Math.min(state.hits.length, 12);
-    if (e.key === "ArrowDown") {
+    if (e.key === "Escape" && els.searchResults && !els.searchResults.hidden) {
+      e.stopPropagation();
       e.preventDefault();
-      state.hitCursor = (state.hitCursor + 1) % maxVisible;
-      renderSearchDropdown();
-      els.searchResults.hidden = false;
-      els.searchResults.querySelector(".sr-item.active")?.scrollIntoView({ block: "nearest" });
-    } else if (e.key === "ArrowUp") {
+      hideSearchDropdown();
+      return;
+    }
+    const list = visibleDropdownHits();
+    if (!list.length) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      state.hitCursor = (state.hitCursor - 1 + maxVisible) % maxVisible;
+      const dir = e.key === "ArrowDown" ? 1 : -1;
+      state.hitCursor = (state.hitCursor + dir + list.length) % list.length;
       renderSearchDropdown();
       els.searchResults.hidden = false;
       els.searchResults.querySelector(".sr-item.active")?.scrollIntoView({ block: "nearest" });
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const id = state.hits[state.hitCursor] || state.hits[0];
-      if (id) {
-        openNode(id, { push: true });
-        markCurrentHit();
+      const hit = list[state.hitCursor] || list[0];
+      if (hit?.id) {
+        openNode(hit.id, { push: true });
+        if (state.hits.length) markCurrentHit();
       }
-      hideSearchDropdown();
-    } else if (e.key === "Escape" && !els.searchResults.hidden) {
-      e.stopPropagation();
       hideSearchDropdown();
     }
   });
   els.searchResults?.addEventListener("mousedown", (e) => {
+    if (e.target.closest(".sr-pill, .sr-item")) e.preventDefault();
+  });
+  els.searchResults?.addEventListener("click", (e) => {
+    const pill = e.target.closest?.("[data-sr-filter]");
+    if (pill) {
+      state.searchFilter = pill.dataset.srFilter || "all";
+      runSearch({ focus: false });
+      if (els.searchResults) els.searchResults.hidden = false;
+      return;
+    }
     const btn = e.target.closest?.(".sr-item");
     if (!btn) return;
-    e.preventDefault();
     const idx = Number(btn.dataset.srIndex);
     const id = btn.dataset.srId;
     if (!Number.isNaN(idx)) state.hitCursor = idx;
     if (id) {
       openNode(id, { push: true });
-      markCurrentHit();
+      if (state.hits.length) markCurrentHit();
     }
     hideSearchDropdown();
   });
@@ -3195,7 +3566,7 @@ function wireChrome() {
     state.doc = els.docFilter.value;
     state.filter = idsPassingDocFilter(state.index, state.doc);
     draw();
-    if (state.query.trim().length >= 2) runSearch({ focus: false });
+    if (searchIsActive()) runSearch({ focus: false });
     else fit();
   });
   $("expand-all").addEventListener("click", expandAll);
@@ -3238,7 +3609,7 @@ function wireChrome() {
       <button type="button" id="export-progress">Export progress</button>
       <button type="button" id="export-progress-plain">Export plain JSON</button>
       <button type="button" id="import-progress">Import progress</button>
-      <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file. Personal notes are included.</p>`;
+      <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file. Personal notes and quick captures are included.</p>`;
     els.editsMenu.hidden = !els.editsMenu.hidden;
     $("export-edits").onclick = exportEdits;
     $("import-edits").onclick = openImport;
@@ -3256,15 +3627,20 @@ function wireChrome() {
     if (!els.editsMenu.hidden && !e.target.closest("#edits-menu") && e.target !== els.editsBtn) {
       els.editsMenu.hidden = true;
     }
-    if (els.searchResults && !els.searchResults.hidden && !e.target.closest(".search-wrap")) {
+    if (els.searchResults && !els.searchResults.hidden && !e.target.closest(".search-wrap, .sr-pill, .sr-item")) {
       hideSearchDropdown();
     }
   });
   els.lockBtn.addEventListener("click", lock);
   document.addEventListener("keydown", (e) => {
     if (focusSearchFromShortcut(e)) return;
+    if (inboxShortcut(e)) return;
     const typing = isTypingTarget(document.activeElement);
     if (e.key === "Escape") {
+      if (inboxOpen) {
+        closeInbox();
+        return;
+      }
       if (!els.modal.hidden) closeModal();
       else if (state.editing) {
         state.editing = false;
@@ -3434,9 +3810,15 @@ async function openCompendium(key) {
 
 function lock() {
   flushPersonalNote();
+  closeInbox({ focus: false });
+  hideSearchDropdown();
   clearReviseSession();
   clearGlossarySession();
   state.key = null;
+  state.searchIndex = null;
+  state.dropdownHits = [];
+  state.hits = [];
+  state.searchFilter = "all";
   state.baseNodes = [];
   state.sections = {};
   state.index = null;

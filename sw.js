@@ -7,6 +7,7 @@ const SHELL = [
   "./css/app.css",
   "./js/main.js",
   "./js/model.js",
+  "./js/search.js",
   "./js/notes.js",
   "./js/crypto.js",
   "./js/layout.js",
