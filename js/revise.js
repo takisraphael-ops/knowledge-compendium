@@ -39,6 +39,17 @@ import {
   scenarioMatches,
   shuffledOrder,
 } from "./pbq.js";
+import { clearLensesCache, loadLenses } from "./lenses.js";
+import {
+  DRILL_LIMIT,
+  DRILL_MS,
+  lensExamVersion,
+  prioritizeDrillCards,
+  scoreLens,
+  selectLens,
+  statusForNode,
+  tierLabel,
+} from "./readiness.js";
 
 const EXAM_VER_KEY = "kc-sy0-version-v1";
 const CARD_MODES = ["flashcards", "practice", "keypoints"];
@@ -54,12 +65,18 @@ let session = null;
 let bound = false;
 let mock = null;
 let mockTimer = 0;
+let drillTimer = 0;
 let historyExpanded = false;
 let hubTab = "study";
 let pbqPack = null;
 let pbqLoading = false;
 let pbqEpoch = 0;
 let pbqRun = null;
+let lensPack = null;
+let lensLoading = false;
+let lensEpoch = 0;
+let lensChoice = null;
+let readyFocus = null;
 
 const PBQ_TYPE_LABEL = {
   order: "Order",
@@ -97,6 +114,7 @@ export function showRevise({ keepScope = false } = {}) {
 export function hideRevise() {
   if (!hooks) return;
   stopMockTimer();
+  stopDrillTimer();
   if (hooks.els.revise) {
     hooks.els.revise.innerHTML = "";
     hooks.els.revise.hidden = true;
@@ -113,7 +131,7 @@ export function getReviseSnapshot() {
     view,
     cursor,
     revealed,
-    hubTab: hubTab === "pbq" ? "pbq" : "study",
+    hubTab: hubTab === "pbq" ? "pbq" : hubTab === "readiness" ? "readiness" : "study",
     scope: { branchIds: [...(scope.branchIds || [])], sectionIds: [...(scope.sectionIds || [])], domainIds: [...(scope.domainIds || [])], mode: scope.mode, examVersion: scope.examVersion === "701" ? "701" : "801" },
   };
 }
@@ -121,7 +139,7 @@ export function getReviseSnapshot() {
 export function restoreRevise(snap) {
   if (!snap) return;
   if (snap.scope) scope = { ...scope, ...snap.scope };
-  if (snap.hubTab === "pbq" || snap.hubTab === "study") hubTab = snap.hubTab;
+  if (snap.hubTab === "pbq" || snap.hubTab === "study" || snap.hubTab === "readiness") hubTab = snap.hubTab;
   view = snap.view || view;
   cursor = Number.isFinite(snap.cursor) ? snap.cursor : cursor;
   revealed = !!snap.revealed;
@@ -146,7 +164,9 @@ export function reloadReviseFromStorage() {
   if (!hooks || !isReviseVisible()) return;
   restoreScope();
   stopMockTimer();
+  stopDrillTimer();
   mock = null;
+  readyFocus = null;
   view = "hub";
   queue = [];
   session = null;
@@ -157,6 +177,7 @@ export function reloadReviseFromStorage() {
 
 export function clearReviseSession() {
   stopMockTimer();
+  stopDrillTimer();
   mock = null;
   view = "hub";
   hubTab = "study";
@@ -169,6 +190,12 @@ export function clearReviseSession() {
   pbqLoading = false;
   pbqRun = null;
   clearPbqCache();
+  lensEpoch += 1;
+  lensPack = null;
+  lensLoading = false;
+  lensChoice = null;
+  readyFocus = null;
+  clearLensesCache();
   hideRevise();
 }
 
@@ -310,10 +337,13 @@ function render() {
   }
   if (view === "mock") ensureMockTimer();
   else stopMockTimer();
+  if (view === "study" && session?.kind === "weak-spot") ensureDrillTimer();
+  else stopDrillTimer();
 }
 
 function renderHub() {
   if (hubTab === "pbq") return renderPbqHub();
+  if (hubTab === "readiness") return renderReadinessHub();
   store = store || loadStore();
   const st = appState();
   const { cards, failures } = currentCatalog();
@@ -588,15 +618,24 @@ function renderStudy() {
   const backLabel = card.kind === "k" ? "Key points" : "Answer";
   const back = revealed ? `<div class="rev-face rev-answer"><div class="rev-face-label">${backLabel}</div>${faceHtml(card.back)}</div>` : "";
 
+  const backAct = session?.returnTab === "readiness" ? "to-readiness" : "to-hub";
+  const clock = session?.kind === "weak-spot"
+    ? `<div class="ready-clock${session.timeUp ? " is-low" : ""}" data-drill-clock role="timer" aria-label="Five minute drill">${session.timeUp ? "0:00" : formatClock((session.endsAt || 0) - Date.now())}</div>`
+    : "";
+  const timeNote = session?.kind === "weak-spot"
+    ? `<p class="ready-timeup" data-drill-note ${session.timeUp ? "" : "hidden"}>Time is up. Finish this card. The next one will not start.</p>`
+    : "";
   return `<div class="rev-page rev-study">
     <div class="rev-top">
-      <button type="button" class="rev-back" data-act="to-hub" aria-label="Back to revision options">Back</button>
+      <button type="button" class="rev-back" data-act="${backAct}" aria-label="${backAct === "to-readiness" ? "Back to readiness" : "Back to revision options"}">Back</button>
       <div class="rev-top-title">
         <h1>${escapeHtml(kind)}</h1>
         <p class="rev-kicker">${n} of ${total} · ${escapeHtml(scopeLabel())}</p>
       </div>
+      ${clock}
     </div>
     <div class="rev-progress-bar" aria-hidden="true"><span style="width:${Math.round(((n - 1) / total) * 100)}%"></span></div>
+    ${timeNote}
     <div class="rev-body rev-study-body">
       <article class="rev-flash">
         <p class="rev-source">${escapeHtml(card.branchTitle || "")} · ${escapeHtml(card.title || "")}</p>
@@ -614,6 +653,8 @@ function renderStudy() {
 }
 
 function scopeLabel() {
+  if (session?.kind === "weak-spot") return "5-min weak-spot drill";
+  if (session?.kind === "objective") return session.objectiveTitle || "Objective drill";
   if (session?.dueOnly) return "Due today";
   const st = appState();
   const names = (st.subjects || []).filter((s) => scope.branchIds.includes(s.rootId)).map((s) => s.title);
@@ -631,18 +672,26 @@ function renderSummary() {
   for (const d of done) counts[d.grade] += 1;
   const { cards } = currentCatalog();
   const leftover = buildQueue(store, cards).length;
+  const backAct = session?.returnTab === "readiness" ? "to-readiness" : "to-hub";
+  const backLabel = session?.returnTab === "readiness" ? "Back to readiness" : "Back to options";
+  const heading = session?.kind === "weak-spot" ? "5-minute drill" : session?.kind === "objective" ? "Objective drill" : "Session summary";
+  const planned = session?.planned || total;
+  const drillNote = session?.kind === "weak-spot"
+    ? `<p class="rev-assess">${session.timeUp ? "The five minutes ended, including the card you just finished." : `You finished all ${planned} cards in this drill set.`}</p>`
+    : "";
 
   return `<div class="rev-page">
     <div class="rev-top">
-      <button type="button" class="rev-back" data-act="to-hub" aria-label="Back to revision options">Back</button>
+      <button type="button" class="rev-back" data-act="${backAct}" aria-label="${escapeHtml(backLabel)}">Back</button>
       <div class="rev-top-title">
-        <h1>Session summary</h1>
+        <h1>${escapeHtml(heading)}</h1>
         <p class="rev-kicker">${escapeHtml(scopeLabel())}</p>
       </div>
     </div>
     <div class="rev-body">
       <section class="rev-card-block">
         <p class="rev-summary-hero">${total} card${total === 1 ? "" : "s"} reviewed</p>
+        ${drillNote}
         <p class="rev-assess">${total ? `You rated ${pct}% Good or Easy (${goodEasy} of ${total}).` : "No cards were rated in this session."}</p>
         <p class="rev-disclaimer">This is a self-assessment of the cards you just rated, not a predicted exam score.</p>
         <dl class="rev-stats">
@@ -652,8 +701,8 @@ function renderSummary() {
           <div><dt>Easy</dt><dd>${counts.easy}</dd></div>
         </dl>
         <div class="rev-start-row">
-          <button type="button" class="solid" data-act="to-hub">Back to options</button>
-          ${!session?.dueOnly && leftover ? `<button type="button" class="tool" data-act="start">Study ${leftover} more due</button>` : ""}
+          <button type="button" class="solid" data-act="${backAct}">${escapeHtml(backLabel)}</button>
+          ${!session?.dueOnly && !session?.returnTab && leftover ? `<button type="button" class="tool" data-act="start">Study ${leftover} more due</button>` : ""}
         </div>
       </section>
     </div>
@@ -667,11 +716,16 @@ function onClick(e) {
   if (act === "leave") {
     if (!confirmLeaveMock()) return;
     hooks.leaveRevise?.();
-  } else if (act === "to-hub") {
+  } else if (act === "to-hub" || act === "to-readiness") {
     if (!confirmLeaveMock()) return;
     stopMockTimer();
+    stopDrillTimer();
     view = "hub";
+    if (act === "to-readiness") hubTab = "readiness";
     revealed = false;
+    queue = act === "to-readiness" ? [] : queue;
+    session = act === "to-readiness" ? null : session;
+    cursor = act === "to-readiness" ? 0 : cursor;
     render();
   } else if (act === "start") {
     startSession();
@@ -728,11 +782,34 @@ function onClick(e) {
   } else if (act === "hub-tab") {
     if (!confirmLeaveMock()) return;
     stopMockTimer();
+    stopDrillTimer();
     mock = null;
-    hubTab = btn.dataset.tab === "pbq" ? "pbq" : "study";
+    const tab = btn.dataset.tab;
+    hubTab = tab === "pbq" ? "pbq" : tab === "readiness" ? "readiness" : "study";
     view = "hub";
     revealed = false;
     render();
+  } else if (act === "ready-lens") {
+    const lens = (lensPack?.lenses || []).find((item) => item.id === btn.dataset.id);
+    if (!lens) return;
+    lensChoice = lens.id;
+    readyFocus = null;
+    const ver = lensExamVersion(lens);
+    if (ver === "801" || ver === "701") {
+      writeExamVersion(ver);
+      persistScope();
+    }
+    render();
+  } else if (act === "ready-obj") {
+    readyFocus = readyFocus === btn.dataset.id ? null : btn.dataset.id;
+    render();
+    if (readyFocus) hooks.els.revise.querySelector(".ready-detail")?.focus?.();
+  } else if (act === "ready-drill") {
+    startWeakSpotDrill();
+  } else if (act === "ready-drill-obj") {
+    startObjectiveDrill(btn.dataset.id);
+  } else if (act === "ready-pbq") {
+    void openPbqFromReadiness(btn.dataset.id);
   } else if (act === "pbq-open") {
     openPbq(btn.dataset.id);
   } else if (act === "pbq-up" || act === "pbq-down") {
@@ -781,6 +858,8 @@ function onChange(e) {
     render();
   } else if (t.dataset.act === "exam-ver") {
     writeExamVersion(t.value === "701" ? "701" : "801");
+    lensChoice = null;
+    readyFocus = null;
     persistScope();
     render();
   } else if (t.dataset.act === "mode") {
@@ -853,13 +932,15 @@ function applyGrade(grade) {
   review(store, card.id, grade);
   saveStore(store);
   session.done.push({ id: card.id, grade });
-  if (grade === "again") {
+  if (grade === "again" && session?.kind !== "weak-spot") {
     const later = queue.slice(cursor + 1).some((c) => c.id === card.id);
     if (!later) queue.push(card);
   }
+  const drillExpired = session?.kind === "weak-spot" && (session.timeUp || (session.endsAt && Date.now() >= session.endsAt));
+  if (drillExpired) session.timeUp = true;
   cursor += 1;
   revealed = false;
-  if (cursor >= queue.length) {
+  if (cursor >= queue.length || drillExpired) {
     view = "summary";
     render();
     hooks.els.revise.scrollTop = 0;
@@ -1105,6 +1186,42 @@ function stopMockTimer() {
   if (mockTimer) {
     clearInterval(mockTimer);
     mockTimer = 0;
+  }
+}
+
+function stopDrillTimer() {
+  if (drillTimer) {
+    clearInterval(drillTimer);
+    drillTimer = 0;
+  }
+}
+
+function ensureDrillTimer() {
+  if (drillTimer || view !== "study" || session?.kind !== "weak-spot") return;
+  drillTimer = setInterval(tickDrillClock, 250);
+}
+
+function tickDrillClock() {
+  if (view !== "study" || session?.kind !== "weak-spot") {
+    stopDrillTimer();
+    return;
+  }
+  const left = (session.endsAt || 0) - Date.now();
+  const el = hooks?.els?.revise?.querySelector("[data-drill-clock]");
+  if (left <= 0) {
+    session.timeUp = true;
+    if (el) {
+      el.textContent = "0:00";
+      el.classList.add("is-low");
+    }
+    const note = hooks?.els?.revise?.querySelector("[data-drill-note]");
+    if (note) note.hidden = false;
+    stopDrillTimer();
+    return;
+  }
+  if (el) {
+    el.textContent = formatClock(left);
+    el.classList.toggle("is-low", left <= 60 * 1000);
   }
 }
 
@@ -1509,10 +1626,17 @@ function confirmLeaveMock() {
 }
 
 function revTabs() {
-  const study = hubTab !== "pbq";
+  const current = hubTab === "pbq" ? "pbq" : hubTab === "readiness" ? "readiness" : "study";
+  const tabs = [
+    ["study", "Study", "rev-tab-study"],
+    ["readiness", "Readiness", "rev-tab-readiness"],
+    ["pbq", "PBQs", "rev-tab-pbq"],
+  ];
   return `<div class="rev-tabs" role="tablist" aria-label="Revise">
-    <button type="button" class="rev-tab ${study ? "on" : ""}" role="tab" id="rev-tab-study" aria-selected="${study ? "true" : "false"}" aria-controls="rev-tab-panel" data-act="hub-tab" data-tab="study">Study</button>
-    <button type="button" class="rev-tab ${study ? "" : "on"}" role="tab" id="rev-tab-pbq" aria-selected="${study ? "false" : "true"}" aria-controls="rev-tab-panel" data-act="hub-tab" data-tab="pbq">PBQs</button>
+    ${tabs.map(([id, label, tabId]) => {
+      const on = current === id;
+      return `<button type="button" class="rev-tab ${on ? "on" : ""}" role="tab" id="${tabId}" aria-selected="${on ? "true" : "false"}" aria-controls="rev-tab-panel" data-act="hub-tab" data-tab="${id}">${label}</button>`;
+    }).join("")}
   </div>`;
 }
 
@@ -1631,7 +1755,7 @@ async function finishPbqLoad() {
   if (epoch !== pbqEpoch) return;
   pbqPack = pack;
   pbqLoading = false;
-  if (isReviseVisible() && ((view === "hub" && hubTab === "pbq") || view === "pbq")) render();
+  if (isReviseVisible() && ((view === "hub" && (hubTab === "pbq" || hubTab === "readiness")) || view === "pbq")) render();
 }
 
 function freshPbqRun(scenario) {
@@ -1942,4 +2066,377 @@ function onMockKey(e) {
     e.preventDefault();
     gradeMock("missed");
   }
+}
+
+const NODE_STATUS_LABEL = {
+  due: "Due",
+  lapsed: "Lapsed",
+  learning: "Learning",
+  mature: "Mature",
+  unseen: "Unseen",
+};
+
+function readyPct(n) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  return `${Math.round(Number(n))}%`;
+}
+
+function formatWeight(n) {
+  const v = Number(n) || 0;
+  return Number.isInteger(v) ? `${v}%` : `${v}%`;
+}
+
+function nodeStatusLabel(status) {
+  return NODE_STATUS_LABEL[status] || NODE_STATUS_LABEL.unseen;
+}
+
+function lensNodeIds(lens) {
+  const ids = [];
+  for (const domain of lens?.domains || []) {
+    for (const objective of domain.objectives || []) ids.push(...(objective.nodeIds || []));
+  }
+  return ids;
+}
+
+function cardsForNodeIds(nodeIds) {
+  const want = new Set(nodeIds || []);
+  if (!want.size) return [];
+  const st = appState();
+  if (!st?.index) return [];
+  const out = [];
+  const seen = new Set();
+  for (const mode of CARD_MODES) {
+    const { cards } = collectCards(st.index, st.subjects, { branchIds: [], sectionIds: [], domainIds: [], mode });
+    for (const card of cards) {
+      if (!want.has(card.nodeId) || !card.id || seen.has(card.id)) continue;
+      seen.add(card.id);
+      out.push(card);
+    }
+  }
+  return out;
+}
+
+function chosenLens(pack) {
+  const list = pack?.lenses || [];
+  if (lensChoice) {
+    const picked = list.find((lens) => lens.id === lensChoice);
+    if (picked) return picked;
+  }
+  return selectLens(list, scope.examVersion);
+}
+
+function currentReadiness() {
+  const lens = chosenLens(lensPack);
+  if (!lens) return null;
+  store = store || loadStore();
+  const cards = cardsForNodeIds(lensNodeIds(lens));
+  const report = scoreLens(lens, {
+    cards,
+    records: store.cards || {},
+    mockHistory: loadMockHistory(),
+    pbqProgress: loadPbqProgress(safeStorage()),
+  });
+  return { lens, cards, report };
+}
+
+function readinessShell(body, kicker) {
+  return `<div class="rev-page">
+    <div class="rev-top">
+      <button type="button" class="rev-back" data-act="leave" aria-label="Back to the map">Back</button>
+      <div class="rev-top-title">
+        <h1>Revise</h1>
+        <p class="rev-kicker">${escapeHtml(kicker)}</p>
+      </div>
+    </div>
+    <div class="rev-body">
+      ${revTabs()}
+      <div id="rev-tab-panel" role="tabpanel" aria-labelledby="rev-tab-readiness">${body}</div>
+    </div>
+  </div>`;
+}
+
+function renderReadinessHub() {
+  if (!lensPack && !lensLoading) {
+    lensLoading = true;
+    void finishLensLoad();
+  }
+  if (!pbqPack && !pbqLoading) {
+    pbqLoading = true;
+    void finishPbqLoad();
+  }
+  const kicker = "Exam readiness from the cards, mocks, and PBQs already on this device.";
+  if (!lensPack) {
+    return readinessShell(`<section class="rev-card-block" aria-busy="true">
+      <h2>Readiness</h2>
+      <p class="pbq-empty" role="status">Loading exam lenses…</p>
+    </section>`, kicker);
+  }
+  if (!lensPack.lenses.length) {
+    return readinessShell(`<section class="rev-card-block">
+      <h2>Readiness</h2>
+      <p class="pbq-empty" role="status">No exam lens is available yet. Flashcards, mock exams, and PBQs are unchanged.</p>
+    </section>`, kicker);
+  }
+  const lens = chosenLens(lensPack);
+  const switcher = lensSwitcher(lensPack, lens);
+  if (!lens) {
+    return readinessShell(`<section class="rev-card-block">
+      <h2>Readiness</h2>
+      ${switcher}
+      <p class="pbq-empty" role="status">No lens is linked to this exam yet. Choose one above, or switch the exam version.</p>
+    </section>`, kicker);
+  }
+  const model = currentReadiness();
+  return readinessShell(`<section class="rev-card-block">
+    <h2>Readiness</h2>
+    ${switcher}
+    ${renderReadinessReport(model)}
+  </section>`, kicker);
+}
+
+function lensSwitcher(pack, lens) {
+  const buttons = (pack?.lenses || []).map((item) => {
+    const on = Boolean(lens && item.id === lens.id);
+    return `<button type="button" class="ready-lens ${on ? "on" : ""}" data-act="ready-lens" data-id="${escapeHtml(item.id)}" aria-pressed="${on ? "true" : "false"}">${escapeHtml(item.title)}</button>`;
+  }).join("");
+  return `<div class="rev-fieldset">
+    <div class="rev-legend">Security+ exam <span class="rev-ver-switch" role="radiogroup" aria-label="Security+ exam version">${examVersionControl()}</span></div>
+    <div class="ready-lenses" role="group" aria-label="Exam lenses">${buttons}</div>
+  </div>`;
+}
+
+function renderReadinessReport(model) {
+  if (!model?.report) return `<p class="pbq-empty" role="status">This lens has nothing to score yet.</p>`;
+  const { report, cards } = model;
+  if (!report.domains.length) return `<p class="pbq-empty" role="status">This lens has no domains yet.</p>`;
+  const objectives = report.domains.flatMap((domain) => domain.objectives);
+  const drillCount = prioritizeDrillCards({
+    objectives,
+    cards,
+    records: store?.cards || {},
+    limit: DRILL_LIMIT,
+  }).length;
+  const overall = readyPct(report.overall.readiness);
+  return `<div class="ready-strip">
+      <div class="ready-score">
+        <span class="ready-score-num">${overall}</span>
+        <span class="ready-k">Exam-weighted readiness</span>
+      </div>
+      <p class="ready-count"><strong>${report.readyCount}</strong> of ${report.objectiveCount} objective${report.objectiveCount === 1 ? "" : "s"} ready</p>
+      ${weakestCallout(report)}
+      <button type="button" class="solid ready-drill" data-act="ready-drill" ${drillCount ? "" : "disabled"}>5-min weak-spot drill</button>
+    </div>
+    <ul class="ready-legend">
+      <li><span class="ready-swatch tier-unstarted"></span>Unstarted</li>
+      <li><span class="ready-swatch tier-needs-work"></span>Needs work</li>
+      <li><span class="ready-swatch tier-building"></span>Building</li>
+      <li><span class="ready-swatch tier-ready"></span>Ready</li>
+    </ul>
+    <div class="ready-domains">
+      ${report.domains.map((domain) => renderDomainCard(domain, cards)).join("")}
+    </div>
+    <p class="rev-fine">Objective tiles use spaced-repetition cards and PBQ scores. Domain bars blend in mock accuracy for this exam when you have attempts. Unstarted means nothing in that objective has been rated yet.</p>`;
+}
+
+function weakestCallout(report) {
+  const weak = report.weakest;
+  if (!weak) return "";
+  return `<div class="ready-weak">
+    <span class="ready-k">Weakest domain</span>
+    <strong>${escapeHtml(weak.id)} ${escapeHtml(weak.title)}</strong>
+    <span>${escapeHtml(formatWeight(weak.weight))} · ${readyPct(weak.readiness)} · ${escapeHtml(tierLabel(weak.tier))}</span>
+  </div>`;
+}
+
+function tileMeta(objective) {
+  const bits = [];
+  if (objective.due) bits.push(`${objective.due} due`);
+  if (objective.pbqCount) {
+    bits.push(objective.pbqScored ? `${objective.pbqScored}/${objective.pbqCount} PBQ` : `${objective.pbqCount} PBQ`);
+  }
+  return bits.join(" · ");
+}
+
+function renderDomainCard(domain, cards) {
+  const width = domain.readiness == null ? 0 : Math.max(0, Math.min(100, Math.round(domain.readiness)));
+  const mockNote = domain.mockPct == null ? "" : `<span class="ready-mock">Mock ${domain.mockPct}%</span>`;
+  const tiles = domain.objectives.map((objective) => renderObjectiveTile(objective)).join("");
+  const detail = domain.objectives.find((objective) => objective.id === readyFocus);
+  return `<section class="ready-domain tier-${domain.tier}">
+    <div class="ready-domain-head">
+      <h3>${escapeHtml(domain.id)} ${escapeHtml(domain.title)}</h3>
+      <p class="ready-domain-meta">
+        <span>${escapeHtml(formatWeight(domain.weight))} of the exam</span>
+        <span>${readyPct(domain.readiness)} · ${escapeHtml(tierLabel(domain.tier))}</span>
+        ${mockNote}
+      </p>
+    </div>
+    <div class="ready-bar" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${width}" aria-valuetext="${escapeHtml(tierLabel(domain.tier))}" aria-label="${escapeHtml(domain.title)} readiness">
+      <span style="width:${width}%"></span>
+    </div>
+    ${tiles ? `<div class="ready-tiles">${tiles}</div>` : `<p class="rev-fine">No objectives in this domain yet.</p>`}
+    ${detail ? renderObjectiveDetail(detail, cards) : ""}
+  </section>`;
+}
+
+function renderObjectiveTile(objective) {
+  const on = readyFocus === objective.id;
+  const meta = tileMeta(objective);
+  const line = meta ? `${tierLabel(objective.tier)} · ${meta}` : tierLabel(objective.tier);
+  const label = `${objective.id} ${objective.title}, ${readyPct(objective.readiness)}, ${line}`;
+  return `<button type="button" class="ready-tile tier-${objective.tier}" data-act="ready-obj" data-id="${escapeHtml(objective.id)}" aria-pressed="${on ? "true" : "false"}" aria-label="${escapeHtml(label)}">
+    <span class="ready-tile-id">${escapeHtml(objective.id)}</span>
+    <span class="ready-tile-title">${escapeHtml(objective.title)}</span>
+    <span class="ready-tile-pct">${readyPct(objective.readiness)}</span>
+    <span class="ready-tile-meta">${escapeHtml(line)}</span>
+  </button>`;
+}
+
+function renderObjectiveDetail(objective, cards) {
+  const meta = `${readyPct(objective.readiness)} · ${tierLabel(objective.tier)} · ${objective.due} due · ${objective.unseen} unseen`;
+  return `<div class="ready-detail" tabindex="-1">
+    <h4>${escapeHtml(objective.id)} ${escapeHtml(objective.title)}</h4>
+    <p class="rev-fine">${escapeHtml(meta)}</p>
+    <h4 class="rev-sub">Topics</h4>
+    <div class="ready-chips">${renderNodeChips(objective, cards)}</div>
+    ${renderPbqChips(objective)}
+    <div class="ready-actions">
+      <button type="button" class="solid ready-drill" data-act="ready-drill-obj" data-id="${escapeHtml(objective.id)}">Drill this objective</button>
+    </div>
+  </div>`;
+}
+
+function renderNodeChips(objective, cards) {
+  if (!objective.nodeIds.length) return `<p class="rev-fine">No topics are mapped to this objective.</p>`;
+  const now = Date.now();
+  const index = appState()?.index;
+  return objective.nodeIds.map((id) => {
+    const node = index?.byId?.get(id);
+    const title = node?.title || id;
+    if (!index?.byId?.has(id)) return `<span class="ready-chip is-missing">${escapeHtml(title)}</span>`;
+    const recs = cards.filter((card) => card.nodeId === id).map((card) => store.cards?.[card.id] || null);
+    const status = statusForNode(recs.length ? recs : [null], now);
+    const kind = NODE_STATUS_LABEL[status.status] ? status.status : "unseen";
+    return `<button type="button" class="ready-chip status-${kind}" data-act="open-topic" data-id="${escapeHtml(id)}">
+      <span class="ready-chip-title">${escapeHtml(title)}</span>
+      <span class="ready-chip-status">${escapeHtml(nodeStatusLabel(kind))}</span>
+    </button>`;
+  }).join("");
+}
+
+function renderPbqChips(objective) {
+  if (!objective.pbqIds.length) return "";
+  const progress = loadPbqProgress(safeStorage());
+  const chips = objective.pbqIds.map((id) => {
+    const scenario = (pbqPack?.scenarios || []).find((item) => item.id === id);
+    const title = scenario?.title || id;
+    const rec = progress[id];
+    const extra = rec?.attempts ? formatPbqScore(rec.bestScore, rec.total) : "Not tried";
+    return `<button type="button" class="ready-chip" data-act="ready-pbq" data-id="${escapeHtml(id)}">
+      <span class="ready-chip-title">${escapeHtml(title)}</span>
+      <span class="ready-chip-status">${escapeHtml(extra)}</span>
+    </button>`;
+  }).join("");
+  return `<h4 class="rev-sub">Performance-based questions</h4><div class="ready-chips">${chips}</div>`;
+}
+
+async function finishLensLoad() {
+  const epoch = lensEpoch;
+  let pack;
+  try {
+    pack = await loadLenses(appState()?.key);
+  } catch {
+    pack = { version: 1, lenses: [], missing: true };
+  }
+  if (epoch !== lensEpoch) return;
+  lensPack = pack;
+  lensLoading = false;
+  if (isReviseVisible() && view === "hub" && hubTab === "readiness") render();
+}
+
+async function openPbqFromReadiness(id) {
+  const epoch = pbqEpoch;
+  try {
+    if (!pbqPack) pbqPack = await loadPbqPack(appState()?.key);
+  } catch {
+    pbqPack = { version: 1, scenarios: [], missing: true };
+  }
+  pbqLoading = false;
+  if (epoch !== pbqEpoch || !isReviseVisible()) return;
+  const scenario = (pbqPack?.scenarios || []).find((item) => item.id === id);
+  if (!scenario) {
+    hooks.toast?.("That PBQ is not available.");
+    return;
+  }
+  hubTab = "pbq";
+  openPbq(id);
+}
+
+function beginDrill(picked, extra) {
+  stopMockTimer();
+  stopDrillTimer();
+  mock = null;
+  queue = picked;
+  cursor = 0;
+  revealed = false;
+  session = { done: [], startedAt: Date.now(), ...extra };
+  view = "study";
+  markCurrentIntroduced();
+  render();
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function startWeakSpotDrill() {
+  const model = currentReadiness();
+  if (!model) {
+    hooks.toast?.("No exam lens is available yet.");
+    return;
+  }
+  store = loadStore();
+  const picked = prioritizeDrillCards({
+    objectives: model.report.domains.flatMap((domain) => domain.objectives),
+    cards: model.cards,
+    records: store.cards || {},
+    limit: DRILL_LIMIT,
+  });
+  if (!picked.length) {
+    hooks.toast?.("Nothing weak is waiting in this lens.");
+    return;
+  }
+  beginDrill(picked, {
+    kind: "weak-spot",
+    endsAt: Date.now() + DRILL_MS,
+    timeUp: false,
+    planned: picked.length,
+    returnTab: "readiness",
+  });
+}
+
+function startObjectiveDrill(id) {
+  const model = currentReadiness();
+  const objective = model?.report.domains.flatMap((domain) => domain.objectives).find((item) => item.id === id);
+  if (!objective) return;
+  store = loadStore();
+  const mine = model.cards.filter((card) => objective.nodeIds.includes(card.nodeId));
+  if (!mine.length) {
+    hooks.toast?.("No cards for this objective yet.");
+    return;
+  }
+  const picked = prioritizeDrillCards({
+    objectives: [objective],
+    cards: mine,
+    records: store.cards || {},
+    limit: mine.length,
+    includeMature: true,
+  });
+  if (!picked.length) {
+    hooks.toast?.("No cards for this objective yet.");
+    return;
+  }
+  beginDrill(picked, {
+    kind: "objective",
+    objectiveTitle: `${objective.id} ${objective.title}`,
+    planned: picked.length,
+    returnTab: "readiness",
+  });
 }
