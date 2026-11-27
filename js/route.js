@@ -110,7 +110,9 @@ export function parseHash(hash, { index, subjects, redirects } = {}) {
   }
 
   if (!raw.startsWith("/")) {
-    return asLegacyId(decodeURIComponent(raw));
+    let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch { /* keep raw */ }
+    return asLegacyId(decoded);
   }
 
   const trailing = raw.endsWith("/") && raw !== "/";

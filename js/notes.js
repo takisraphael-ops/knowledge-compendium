@@ -46,11 +46,11 @@ function inline(s) {
   t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, label, url) => {
     return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
   });
-  t = t.replace(/(?<!href=")https?:\/\/[^\s<]+/g, (m) => {
+  t = mapTextOutsideProtectedTags(t, (seg) => seg.replace(/https?:\/\/[^\s<]+/g, (m) => {
     const trail = m.match(/[),.;:]+$/)?.[0] || "";
     const core = trail ? m.slice(0, -trail.length) : m;
     return `<a href="${core}" target="_blank" rel="noopener noreferrer">${core}</a>${trail}`;
-  });
+  }));
   t = mapTextOutsideProtectedTags(t, italicize);
   return t;
 }
@@ -487,7 +487,21 @@ function sanitizeDiagramNode(src, doc) {
   if (src.nodeType !== 1) return null;
   const tag = src.tagName.toLowerCase();
   if (!DIAGRAM_TAGS.has(tag)) return null;
-  const outName = tag === "clippath" ? "clipPath" : tag;
+  const SVG_TAG_CASE = {
+    clippath: "clipPath",
+    lineargradient: "linearGradient",
+    radialgradient: "radialGradient",
+  };
+  const SVG_ATTR_CASE = {
+    viewbox: "viewBox",
+    preserveaspectratio: "preserveAspectRatio",
+    markerwidth: "markerWidth",
+    markerheight: "markerHeight",
+    refx: "refX",
+    refy: "refY",
+    gradientunits: "gradientUnits",
+  };
+  const outName = SVG_TAG_CASE[tag] || tag;
   const out = doc.createElementNS("http://www.w3.org/2000/svg", outName);
   for (const attr of [...src.attributes]) {
     const name = attr.name;
@@ -499,7 +513,7 @@ function sanitizeDiagramNode(src, doc) {
       if (!isSafeDiagramUrl(val)) continue;
     }
     if (/^\s*(?:javascript|data|vbscript):/i.test(val)) continue;
-    out.setAttribute(name, val);
+    out.setAttribute(SVG_ATTR_CASE[lname] || name, val);
   }
   for (const child of src.childNodes) {
     const next = sanitizeDiagramNode(child, doc);

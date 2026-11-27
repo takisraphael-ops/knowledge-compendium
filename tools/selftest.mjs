@@ -20,7 +20,8 @@ import {
   subtreeIds,
   wouldCycle,
 } from "../js/model.js";
-import { renderNotes, renderKeyTerms } from "../js/notes.js";
+import { renderNotes, renderKeyTerms, renderKeyPoints } from "../js/notes.js";
+import { parseHash } from "../js/route.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 let failed = 0;
@@ -39,6 +40,8 @@ const html = renderNotes(
 check("source block", html.includes('class="src-block"') && html.includes("Oven log") && html.includes("Tide book"));
 check("heading bullet table", html.includes("<h3>") && html.includes("<ul>") && html.includes("<ol>") && html.includes("<th>Stage</th>"));
 check("escapes html", !renderNotes("<script>").includes("<script>"));
+check("code url not autolinked", renderNotes("See `https://api.example.com/v1`").includes("<code>https://api.example.com/v1</code>"));
+check("malformed legacy hash safe", parseHash("#%E0%A4%A", { index: buildIndex([{ id: "root", title: "Root", parentId: null }]), subjects: [] }).mode === "overview");
 
 const base = [
   { id: "root", title: "Root", parentId: null, summary: "", text: "", docs: [], tags: [] },
@@ -74,6 +77,18 @@ check("searchBlob includes keyTerms", ktBlob.includes("multi-factor authenticati
 const ktHtml = renderKeyTerms(withTerms);
 check("renderKeyTerms block", ktHtml.includes("key-terms") && ktHtml.includes("open") && ktHtml.includes("c48") && ktHtml.includes("Two different factor types."));
 check("renderKeyTerms empty", renderKeyTerms({ id: "z" }) === "");
+
+const withPoints = normalizeNode({
+  id: "kp", title: "Key points test", parentId: "root",
+  keyPoints: ["AES uses 128-bit blocks.", "  ", "3DES is not for new encryption."],
+  keyPointsFromOwner: true,
+});
+check("keyPoints kept", Array.isArray(withPoints.keyPoints) && withPoints.keyPoints.length === 2 && withPoints.keyPointsFromOwner === true);
+check("keyPoints dropped when empty", !("keyPoints" in normalizeNode({ id: "x", title: "X" })));
+check("searchBlob includes keyPoints", searchBlob(withPoints).includes("128-bit blocks"));
+const kpHtml = renderKeyPoints(withPoints);
+check("renderKeyPoints block", kpHtml.includes("panel-key-points") && kpHtml.includes("AES uses 128-bit blocks.") && kpHtml.includes("Drawn from the Key Points table"));
+check("renderKeyPoints empty", renderKeyPoints({ id: "z" }) === "");
 
 function chain(n, prefix) {
   const nodes = [{ id: "root", title: "Root", parentId: null }];
@@ -142,7 +157,15 @@ check("compressed round trip", JSON.stringify(packedBack) === JSON.stringify(sec
 check("uncompressed payload has no comp flag", blob.comp == null);
 
 const dir = await mkdtemp(join(tmpdir(), "kc-merge-"));
-await cp(join(root, "sample-data"), join(dir, "plain"), { recursive: true });
+await mkdir(join(dir, "plain"), { recursive: true });
+await writeFile(join(dir, "plain", "tree.json"), JSON.stringify({ nodes: [{ id: "root", title: "Root", parentId: null, summary: "", text: "", docs: [], tags: [] }] }));
+await writeFile(join(dir, "plain", "galley.json"), JSON.stringify({
+  nodes: [
+    { id: "g-stew", title: "Stew", parentId: "root", summary: "", text: "", docs: [], tags: [] },
+    { id: "g-salt", title: "Salt", parentId: "g-stew", summary: "Old salt note", text: "", docs: [], tags: [] },
+    { id: "g-long", title: "Long", parentId: "g-stew", summary: "", text: "", docs: [], tags: [] },
+  ],
+}));
 const sampleEdits = {
   v: 1,
   added: [{ id: "g-new", title: "Ash cakes", parentId: "g-stew", summary: "On the coals.", text: "", docs: [], tags: ["stew"] }],
@@ -165,12 +188,21 @@ await rm(dir, { recursive: true, force: true });
 const catalogPath = join(root, "data", "index.json");
 try {
   const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
-  const demoKey = await deriveKey("open-sesame", Buffer.from(catalog.kdf.salt, "base64"), catalog.kdf.iterations, true);
-  for (const branch of catalog.branches) {
-    const payload = JSON.parse(await readFile(join(root, "data", branch.file), "utf8"));
-    const plain = await decryptJson(demoKey, payload, branch.id);
-    const expected = JSON.parse(await readFile(join(root, "sample-data", `${branch.id}.json`), "utf8"));
-    check(`committed ${branch.id} matches sample`, JSON.stringify(plain) === JSON.stringify(expected));
+  let hasSample = true;
+  try { await readFile(join(root, "sample-data", "tree.json")); } catch { hasSample = false; }
+  if (hasSample) {
+    const demoKey = await deriveKey("open-sesame", Buffer.from(catalog.kdf.salt, "base64"), catalog.kdf.iterations, true);
+    for (const branch of catalog.branches) {
+      const payload = JSON.parse(await readFile(join(root, "data", branch.file), "utf8"));
+      const plain = await decryptJson(demoKey, payload, branch.id);
+      const expected = JSON.parse(await readFile(join(root, "sample-data", `${branch.id}.json`), "utf8"));
+      check(`committed ${branch.id} matches sample`, JSON.stringify(plain) === JSON.stringify(expected));
+    }
+  } else {
+    for (const branch of catalog.branches) {
+      const payload = JSON.parse(await readFile(join(root, "data", branch.file), "utf8"));
+      check(`committed ${branch.id} envelope valid`, payload.v === 1 && payload.alg === "AES-GCM" && typeof payload.iv === "string" && typeof payload.ciphertext === "string");
+    }
   }
 } catch (err) {
   check(`committed catalog (${err.message})`, false);
