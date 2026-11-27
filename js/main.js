@@ -36,7 +36,7 @@ import {
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 import { buildBacklinkIndex } from "./backlinks.js";
-import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise, getReviseStore, reloadReviseFromStorage, applyImportedExamVersion, currentExamVersion } from "./revise.js";
+import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise, getReviseStore, reloadReviseFromStorage, adoptExternalProgress, applyImportedExamVersion, currentExamVersion } from "./revise.js";
 import { collectTermsForNode, keyPointsOf, parsePracticePairs } from "./cards.js";
 import { isDue } from "./schedule.js";
 import {
@@ -66,6 +66,7 @@ import {
   writeProgress,
 } from "./progress.js";
 import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips, setGlossaryOpener } from "./abbr.js";
+import { createGistSyncController, renderGistSyncSection } from "./gist-sync.js";
 import { buildGlossary, initGlossary, showGlossary, hideGlossary, isGlossaryVisible, clearGlossarySession, glossaryHash, getGlossaryEntry, glossarySlug } from "./glossary.js";
 
 const PALETTE = [
@@ -137,6 +138,7 @@ const els = {
   editsBtn: $("edits-btn"),
   editsMenu: $("edits-menu"),
   themeBtn: $("theme-btn"),
+  gistStatus: $("gist-sync-status"),
   lockBtn: $("lock-btn"),
   reviseBtn: $("revise-btn"),
   progressFile: $("progress-import-file"),
@@ -216,6 +218,7 @@ let toastTimer = 0;
 let searchTimer = 0;
 let noteTimer = 0;
 let noteDraft = null;
+let gistSync = null;
 let inboxOpen = false;
 let inboxShowArchived = false;
 let inboxEditingId = null;
@@ -1405,6 +1408,7 @@ function liveStoredIds(key, limit) {
 function rememberRecent(id) {
   if (!id || !state.index?.byId.has(id) || id === state.index.rootId) return;
   try { pushRecent(localStorage, id); } catch { /* ignore */ }
+  noteProgressTouched();
 }
 
 function noteOpenedTopic(id) {
@@ -1422,6 +1426,7 @@ function toggleBookmark(id) {
   const cur = readStoredIds(BOOKMARKS_KEY);
   const next = cur.includes(id) ? cur.filter((x) => x !== id) : [id, ...cur].slice(0, 200);
   writeStoredIds(BOOKMARKS_KEY, next);
+  noteProgressTouched();
   renderPanel();
   refreshSearchIfActive();
   if (els.overviewGrid) els.overviewGrid.dataset.key = "";
@@ -2022,7 +2027,7 @@ function schedulePersonalNote(id, text) {
   refreshSearchIfActive();
 }
 
-function flushPersonalNote() {
+function flushPersonalNote({ touch = true } = {}) {
   clearTimeout(noteTimer);
   noteTimer = 0;
   if (!noteDraft) return;
@@ -2043,6 +2048,7 @@ function flushPersonalNote() {
     return;
   }
   noteDraft = null;
+  if (touch) noteProgressTouched();
   if (state.selected !== id) return;
   const status = $("my-notes-status");
   if (status) status.textContent = "Saved";
@@ -2653,6 +2659,7 @@ async function importStudyProgressFile(file) {
     if (inboxOpen) renderInbox();
     if (state.index) renderPanel();
     toast(replace ? "Study progress replaced from the file." : "Study progress merged from the file.");
+    noteProgressTouched();
   } catch (err) {
     console.error(err);
     if (err?.code === "decrypt") {
@@ -2663,6 +2670,147 @@ async function importStudyProgressFile(file) {
       toast("That file could not be imported. It is not a valid progress file.");
     }
   }
+}
+
+function noteProgressTouched() {
+  gistSync?.scheduleAutoSync();
+}
+
+function ensureGistSync() {
+  if (gistSync) return gistSync;
+  gistSync = createGistSyncController({
+    storage: localStorage,
+    getKey: () => state.key,
+    collect: () => {
+      flushPersonalNote({ touch: false });
+      return currentProgressBundle();
+    },
+    applyBundle: (bundle) => applySyncedBundle(bundle),
+    onStatus: () => paintGistSync(),
+  });
+  return gistSync;
+}
+
+function applySyncedBundle(bundle) {
+  writeProgress(localStorage, bundle);
+  applyImportedPrefs(bundle.prefs);
+  adoptExternalProgress();
+  rebuildSearchIndex();
+  refreshDueBadge();
+  paintInboxBadge();
+  if (inboxOpen) renderInbox();
+  if (state.index && state.selected) renderPanel();
+}
+
+function paintGistSync() {
+  const view = ensureGistSync().view();
+  const btn = els.gistStatus;
+  if (btn) {
+    const show = view.connected && !els.app?.hidden;
+    btn.hidden = !show;
+    btn.classList.toggle("is-busy", view.phase === "syncing");
+    btn.classList.toggle("is-err", view.phase === "error");
+    btn.classList.toggle("is-ok", view.phase !== "syncing" && view.phase !== "error");
+    if (view.phase === "syncing") {
+      btn.textContent = "Syncing…";
+      btn.setAttribute("aria-label", "Cloud sync in progress");
+    } else if (view.phase === "error") {
+      btn.textContent = "Sync error";
+      btn.setAttribute("aria-label", "Cloud sync error. Open cloud sync.");
+    } else {
+      btn.textContent = "Synced";
+      btn.setAttribute("aria-label", "Cloud sync. Sync now.");
+    }
+  }
+  for (const root of document.querySelectorAll("[data-gist-root]")) {
+    const msg = root.querySelector(".gist-msg");
+    if (msg) {
+      msg.textContent = view.message || "";
+      msg.classList.toggle("is-err", view.phase === "error");
+      msg.classList.toggle("is-ok", view.phase === "synced");
+    }
+    const when = root.querySelector(".gist-when");
+    if (when) when.textContent = gistWhenLabel(view.lastSyncAt);
+    const idInput = root.querySelector(".gist-id");
+    if (idInput && document.activeElement !== idInput && view.gistId && !idInput.value) idInput.value = view.gistId;
+    const busy = view.phase === "syncing";
+    root.querySelector("[data-gist=connect]")?.toggleAttribute("disabled", busy);
+    root.querySelector("[data-gist=sync]")?.toggleAttribute("disabled", !view.connected || busy);
+    root.querySelector("[data-gist=copy]")?.toggleAttribute("disabled", !view.gistId);
+    root.querySelector("[data-gist=disconnect]")?.toggleAttribute("disabled", !view.connected || busy);
+    const token = root.querySelector(".gist-token");
+    const auto = root.querySelector("[data-gist=auto]");
+    if (token) token.disabled = busy;
+    if (idInput) idInput.disabled = busy;
+    if (auto) {
+      auto.disabled = busy;
+      if (document.activeElement !== auto) auto.checked = view.autoSync;
+    }
+  }
+}
+
+function gistWhenLabel(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  try {
+    return `Last sync ${d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`;
+  } catch {
+    return `Last sync ${String(iso).slice(0, 16).replace("T", " ")}`;
+  }
+}
+
+function openGistSyncDialog() {
+  els.editsMenu.hidden = true;
+  const view = ensureGistSync().view();
+  openModal(`<h2>Cloud sync</h2>${renderGistSyncSection(view, { heading: false })}<div class="row-actions"><button type="button" data-act="modal-close">Close</button></div>`);
+}
+
+async function onGistAction(target) {
+  const btn = target.closest?.("[data-gist]");
+  if (!btn || btn.disabled) return;
+  const root = btn.closest("[data-gist-root]");
+  if (!root) return;
+  const act = btn.dataset.gist;
+  const sync = ensureGistSync();
+  if (act === "connect") {
+    const token = root.querySelector(".gist-token")?.value || "";
+    const gistId = root.querySelector(".gist-id")?.value || "";
+    const result = await sync.connect({ token, gistId });
+    if (result?.ok) {
+      const field = root.querySelector(".gist-token");
+      if (field) field.value = "";
+    }
+    paintGistSync();
+    return;
+  }
+  if (act === "sync") {
+    await sync.syncNow();
+    paintGistSync();
+    return;
+  }
+  if (act === "copy") {
+    const id = sync.view().gistId;
+    if (!id) return;
+    try {
+      await navigator.clipboard.writeText(id);
+      toast("Gist id copied");
+    } catch {
+      toast(id);
+    }
+    return;
+  }
+  if (act === "disconnect") {
+    sync.disconnect();
+    for (const field of document.querySelectorAll(".gist-id, .gist-token")) field.value = "";
+    paintGistSync();
+  }
+}
+
+function onGistChange(e) {
+  const input = e.target;
+  if (!input?.matches?.("[data-gist=auto]")) return;
+  ensureGistSync().setAutoSync(input.checked);
 }
 
 function onGlossaryClick(e) {
@@ -3332,7 +3480,8 @@ function onInboxSubmit(e) {
   inboxShowArchived = false;
   inboxEditingId = null;
   renderInbox();
-  toast("Saved to the inbox.");
+    toast("Saved to the inbox.");
+  noteProgressTouched();
   $("inbox-text")?.focus();
 }
 
@@ -3390,6 +3539,7 @@ function onInboxClick(e) {
     }
     inboxEditingId = null;
     paintInboxBadge();
+    noteProgressTouched();
     renderInbox();
     return;
   }
@@ -3401,6 +3551,7 @@ function onInboxClick(e) {
     }
     inboxEditingId = null;
     paintInboxBadge();
+    noteProgressTouched();
     renderInbox();
     return;
   }
@@ -3412,12 +3563,14 @@ function onInboxClick(e) {
     }
     if (inboxEditingId === id) inboxEditingId = null;
     paintInboxBadge();
+    noteProgressTouched();
     renderInbox();
   }
 }
 
 function wireChrome() {
   bindAbbrTooltips();
+  ensureGistSync();
   initRevise({
     els: { revise: els.revise, reviseBtn: els.reviseBtn },
     getState: () => state,
@@ -3426,8 +3579,12 @@ function wireChrome() {
     toast,
     exportStudyProgress,
     promptImportProgress,
+    gistSyncHtml: () => renderGistSyncSection(ensureGistSync().view()),
     onDueChange: () => refreshDueBadge({ redrawOverview: false }),
-    onStudyDataChanged: () => refreshDueBadge(),
+    onStudyDataChanged: () => {
+      refreshDueBadge();
+      noteProgressTouched();
+    },
   });
   initGlossary({
     els: { glossary: els.glossary, glossaryBtn: els.glossaryBtn },
@@ -3609,6 +3766,7 @@ function wireChrome() {
       <button type="button" id="export-progress">Export progress</button>
       <button type="button" id="export-progress-plain">Export plain JSON</button>
       <button type="button" id="import-progress">Import progress</button>
+      <button type="button" id="open-gist-sync">Cloud sync…</button>
       <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file. Personal notes and quick captures are included.</p>`;
     els.editsMenu.hidden = !els.editsMenu.hidden;
     $("export-edits").onclick = exportEdits;
@@ -3617,12 +3775,25 @@ function wireChrome() {
     $("export-progress").onclick = () => exportStudyProgress({ plain: false });
     $("export-progress-plain").onclick = () => exportStudyProgress({ plain: true });
     $("import-progress").onclick = () => promptImportProgress();
+    $("open-gist-sync").onclick = () => openGistSyncDialog();
   });
   els.progressFile?.addEventListener("change", () => {
     const file = els.progressFile.files?.[0];
     els.progressFile.value = "";
     if (file) importStudyProgressFile(file);
   });
+  els.gistStatus?.addEventListener("click", () => {
+    const view = ensureGistSync().view();
+    if (view.phase === "error") openGistSyncDialog();
+    else ensureGistSync().syncNow();
+  });
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest?.("[data-gist]");
+    if (!btn || btn.dataset.gist === "auto") return;
+    e.preventDefault();
+    onGistAction(btn);
+  });
+  document.addEventListener("change", onGistChange);
   document.addEventListener("click", (e) => {
     if (!els.editsMenu.hidden && !e.target.closest("#edits-menu") && e.target !== els.editsBtn) {
       els.editsMenu.hidden = true;
@@ -3802,6 +3973,8 @@ async function openCompendium(key) {
   els.gate.hidden = true;
   els.app.hidden = false;
   refreshDueBadge({ redrawOverview: false });
+  paintGistSync();
+  ensureGistSync().onUnlock().catch(() => {});
   if (!location.hash || location.hash === "#") {
     history.replaceState(null, "", "#/");
   }
@@ -3810,6 +3983,7 @@ async function openCompendium(key) {
 
 function lock() {
   flushPersonalNote();
+  gistSync?.clearMemoryToken();
   closeInbox({ focus: false });
   hideSearchDropdown();
   clearReviseSession();
@@ -3839,6 +4013,7 @@ function lock() {
   sessionStorage.setItem(LOCK_FLAG, "1");
   els.app.hidden = true;
   els.gate.hidden = false;
+  if (els.gistStatus) els.gistStatus.hidden = true;
   els.gateStatus.textContent = "";
   els.gateError.textContent = "";
   const saved = readSavedKey();

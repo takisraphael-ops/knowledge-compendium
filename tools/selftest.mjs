@@ -8,6 +8,16 @@ import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { decryptJson, deriveKey, encryptJson, randomBytes } from "../js/crypto.js";
 import {
+  GIST_FILENAME,
+  GIST_SYNC_KEY,
+  GIST_TOKEN_AAD,
+  createGistSyncController,
+  decryptGistToken,
+  encryptGistToken,
+  saveGistConfig,
+  syncNow,
+} from "../js/gist-sync.js";
+import {
   PBQ_AAD,
   PBQ_STORAGE_KEY,
   clearPbqCache,
@@ -1467,6 +1477,276 @@ check("writing an empty inbox removes the key", inboxOther.getItem(INBOX_KEY) ==
 function loadIds(storage) {
   return JSON.parse(storage.getItem(INBOX_KEY)).map((item) => item.id).join();
 }
+
+const GIST_TOKEN = "ghp_TEST_PLAINTEXT_TOKEN_9f3a";
+const gistKey = await deriveKey("gist vault passphrase", randomBytes(16), 1000, true);
+const otherGistKey = await deriveKey("other vault passphrase", randomBytes(16), 1000, true);
+
+function recordingStorage() {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k),
+    dump: () => [...m.entries()].map(([k, v]) => `${k}=${v}`).join("\n"),
+  };
+}
+
+function httpResult(status, body) {
+  const text = typeof body === "string" ? body : JSON.stringify(body ?? {});
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async text() { return text; },
+  };
+}
+
+function gistApi({ token = GIST_TOKEN, fail } = {}) {
+  const gists = new Map();
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const method = (opts.method || "GET").toUpperCase();
+    const body = opts.body ? JSON.parse(opts.body) : null;
+    const auth = opts.headers?.Authorization || "";
+    calls.push({ url, method, body, auth });
+    if (fail === "offline") throw new TypeError("Failed to fetch");
+    if (fail === "401" || !auth.includes(token)) {
+      return httpResult(fail === "403" ? 403 : 401, { message: fail === "403" ? "Resource not accessible by integration" : "Bad credentials" });
+    }
+    if (fail === "403") return httpResult(403, { message: "Resource not accessible by integration" });
+    if (method === "POST") {
+      if (body?.public !== false) return httpResult(422, { message: "public must be false" });
+      const id = `abc123def456789${gists.size + 1}`;
+      const content = body.files?.[GIST_FILENAME]?.content;
+      const gist = {
+        id,
+        public: false,
+        description: body.description,
+        files: { [GIST_FILENAME]: { filename: GIST_FILENAME, content, truncated: false } },
+      };
+      gists.set(id, gist);
+      return httpResult(201, gist);
+    }
+    const id = decodeURIComponent(url.split("/").pop() || "");
+    const gist = gists.get(id);
+    if (!gist) return httpResult(404, { message: "Not Found" });
+    if (method === "GET") return httpResult(200, gist);
+    if (method === "PATCH") {
+      const content = body?.files?.[GIST_FILENAME]?.content;
+      if (typeof content === "string") gist.files[GIST_FILENAME] = { filename: GIST_FILENAME, content, truncated: false };
+      return httpResult(200, gist);
+    }
+    if (method === "DELETE") {
+      gists.delete(id);
+      return httpResult(204, "");
+    }
+    return httpResult(500, { message: "nope" });
+  };
+  return { fetchImpl, gists, calls };
+}
+
+const tokenEnvelope = await encryptGistToken(gistKey, GIST_TOKEN);
+const tokenBack = await decryptGistToken(gistKey, tokenEnvelope);
+check("gist token round trip", tokenBack === GIST_TOKEN && tokenEnvelope.ciphertext && !tokenEnvelope.ciphertext.includes(GIST_TOKEN));
+let wrongToken = false;
+try { await decryptGistToken(otherGistKey, tokenEnvelope); } catch (err) { wrongToken = err?.code === "token-locked"; }
+check("gist token is bound to the unlock key", wrongToken);
+
+const tokenStore = recordingStorage();
+saveGistConfig(tokenStore, { token: GIST_TOKEN, tokenEnc: tokenEnvelope, gistId: "abc123def4567890", autoSync: true });
+const storedConfig = JSON.parse(tokenStore.getItem(GIST_SYNC_KEY));
+check(
+  "plaintext token is not stored",
+  storedConfig.token == null &&
+  storedConfig.tokenEnc.iv === tokenEnvelope.iv &&
+  !tokenStore.dump().includes(GIST_TOKEN) &&
+  !tokenStore.dump().includes(GIST_TOKEN_AAD)
+);
+
+const cloudLocal = buildProgressBundle({
+  notes: { c1: { text: "local-older", updatedAt: 1 }, c2: { text: "local-newer-note", updatedAt: 50 } },
+  inbox: [{ id: "in-1", text: "local-capture", createdAt: 1, updatedAt: 20 }],
+  pbq: {
+    "pbq-a": { bestScore: 1, total: 5, attempts: 1, lastAt: 5, passed: false },
+    "pbq-b": { bestScore: 4, total: 5, attempts: 1, lastAt: 5, passed: false },
+  },
+  srs: {
+    settings: { newPerDay: 20, scope: { branchIds: ["cyber"], sectionIds: [], domainIds: [], mode: "flashcards", examVersion: "801" } },
+    cards: { "t:c2:local": srsCard({ reps: 5, lapses: 0, last: 3000 }) },
+  },
+  bookmarks: ["c1"],
+  mockHistory: [mockAttempt({ id: "local-mock", date: "2026-10-01T00:00:00.000Z" })],
+});
+const cloudStore = recordingStorage();
+writeProgress(cloudStore, cloudLocal);
+const api = gistApi();
+let applied = 0;
+const cloud = createGistSyncController({
+  storage: cloudStore,
+  fetchImpl: api.fetchImpl,
+  getKey: () => gistKey,
+  collect: () => collectProgress(cloudStore),
+  applyBundle: (bundle) => {
+    applied += 1;
+    writeProgress(cloudStore, bundle);
+  },
+});
+const created = await cloud.connect({ token: GIST_TOKEN, gistId: "" });
+const post = api.calls.find((call) => call.method === "POST");
+check(
+  "gist create is secret and encrypted",
+  created.ok === true &&
+  created.created === true &&
+  post?.body?.public === false &&
+  typeof post.body.files[GIST_FILENAME].content === "string" &&
+  !post.body.files[GIST_FILENAME].content.includes(GIST_TOKEN) &&
+  !post.body.files[GIST_FILENAME].content.includes("local-older") &&
+  !post.body.description.includes(GIST_TOKEN)
+);
+const createdPlain = await readProgressPayload(post.body.files[GIST_FILENAME].content, gistKey);
+check(
+  "created gist decrypts to local progress without sync secrets",
+  createdPlain.notes.c2.text === "local-newer-note" &&
+  !JSON.stringify(createdPlain).includes(GIST_TOKEN) &&
+  !JSON.stringify(createdPlain).includes(GIST_SYNC_KEY) &&
+  !cloudStore.dump().includes(GIST_TOKEN)
+);
+
+const remoteBundle = buildProgressBundle({
+  notes: { c1: { text: "remote-newer-note", updatedAt: 30 }, c2: { text: "remote-older", updatedAt: 10 } },
+  inbox: [
+    { id: "in-1", text: "remote-old-capture", createdAt: 1, updatedAt: 5 },
+    { id: "in-2", text: "remote-capture", createdAt: 2, updatedAt: 8 },
+  ],
+  pbq: {
+    "pbq-a": { bestScore: 5, total: 5, attempts: 2, lastAt: 9, passed: true },
+    "pbq-b": { bestScore: 1, total: 5, attempts: 1, lastAt: 4, passed: false },
+  },
+  srs: {
+    settings: { newPerDay: 20 },
+    cards: { "t:c1:alpha": srsCard({ reps: 4, lapses: 1, last: 1000 }) },
+  },
+  bookmarks: ["c9"],
+  mockHistory: [mockAttempt({ id: "remote-mock", date: "2026-11-02T00:00:00.000Z", correct: 9 })],
+});
+const remoteEnv = JSON.stringify(await encryptProgress(gistKey, remoteBundle));
+api.gists.get(created.gistId).files[GIST_FILENAME].content = remoteEnv;
+cloud.clearMemoryToken();
+const mergedSync = await cloud.syncNow();
+const patch = [...api.calls].reverse().find((call) => call.method === "PATCH");
+const mergedPlain = await readProgressPayload(patch.body.files[GIST_FILENAME].content, gistKey);
+const mergedLocal = collectProgress(cloudStore);
+check(
+  "pull merge push keeps newest notes, higher PBQ scores, and both cards",
+  mergedSync.ok === true &&
+  mergedSync.created === false &&
+  mergedPlain.notes.c1.text === "remote-newer-note" &&
+  mergedPlain.notes.c2.text === "local-newer-note" &&
+  mergedPlain.inbox.find((item) => item.id === "in-1").text === "local-capture" &&
+  mergedPlain.inbox.some((item) => item.id === "in-2") &&
+  mergedPlain.pbq["pbq-a"].bestScore === 5 &&
+  mergedPlain.pbq["pbq-b"].bestScore === 4 &&
+  mergedPlain.srs.cards["t:c2:local"].reps === 5 &&
+  mergedPlain.srs.cards["t:c1:alpha"].reps === 4 &&
+  mergedPlain.bookmarks.includes("c1") &&
+  mergedPlain.bookmarks.includes("c9") &&
+  mergedLocal.notes.c1.text === "remote-newer-note" &&
+  mergedLocal.mockHistory.some((item) => item.id === "local-mock") &&
+  mergedLocal.mockHistory.some((item) => item.id === "remote-mock") &&
+  !patch.body.files[GIST_FILENAME].content.includes(GIST_TOKEN) &&
+  !patch.body.files[GIST_FILENAME].content.includes("remote-newer-note") &&
+  !JSON.stringify(mergedPlain).includes(GIST_SYNC_KEY) &&
+  !cloudStore.dump().includes(GIST_TOKEN)
+);
+
+const doomed = recordingStorage();
+writeProgress(doomed, buildProgressBundle({ notes: { c1: { text: "keep-me", updatedAt: 4 } }, bookmarks: ["c1"] }));
+const beforeDoom = doomed.dump();
+const denied = await syncNow({
+  key: gistKey,
+  token: "ghp_WRONG_TOKEN",
+  storage: doomed,
+  fetchImpl: gistApi({ fail: "401" }).fetchImpl,
+  collect: () => collectProgress(doomed),
+  applyBundle: () => { throw new Error("should not write"); },
+});
+const forbidden = await syncNow({
+  key: gistKey,
+  token: "ghp_WRONG_TOKEN",
+  storage: doomed,
+  fetchImpl: gistApi({ fail: "403" }).fetchImpl,
+  collect: () => collectProgress(doomed),
+  applyBundle: () => { throw new Error("should not write"); },
+});
+const offline = await syncNow({
+  key: gistKey,
+  token: GIST_TOKEN,
+  storage: doomed,
+  fetchImpl: gistApi({ fail: "offline" }).fetchImpl,
+  collect: () => collectProgress(doomed),
+  applyBundle: () => { throw new Error("should not write"); },
+});
+check(
+  "401 and 403 leave local progress untouched",
+  denied.ok === false && denied.code === "unauthorized" && /token/i.test(denied.message) && /nothing on this device was changed/i.test(denied.message) &&
+  forbidden.ok === false && forbidden.code === "forbidden" && /token/i.test(forbidden.message) && /nothing on this device was changed/i.test(forbidden.message) &&
+  doomed.dump() === beforeDoom && collectProgress(doomed).notes.c1.text === "keep-me"
+);
+check(
+  "offline sync leaves local progress untouched",
+  offline.ok === false && offline.code === "offline" && /offline/i.test(offline.message) && /nothing on this device was changed/i.test(offline.message) &&
+  doomed.dump() === beforeDoom
+);
+
+const sealed = recordingStorage();
+writeProgress(sealed, buildProgressBundle({ notes: { c9: { text: "still-local", updatedAt: 3 } } }));
+const sealedApi = gistApi();
+const sealedGist = await syncNow({
+  key: gistKey,
+  token: GIST_TOKEN,
+  storage: sealed,
+  fetchImpl: sealedApi.fetchImpl,
+  collect: () => collectProgress(sealed),
+  applyBundle: (bundle) => writeProgress(sealed, bundle),
+  gistId: "",
+});
+sealedApi.gists.get(sealedGist.gistId).files[GIST_FILENAME].content = JSON.stringify(await encryptProgress(otherGistKey, buildProgressBundle({
+  notes: { c9: { text: "foreign", updatedAt: 9 } },
+})));
+const beforeForeign = collectProgress(sealed).notes.c9.text;
+const foreign = await syncNow({
+  key: gistKey,
+  token: GIST_TOKEN,
+  storage: sealed,
+  fetchImpl: sealedApi.fetchImpl,
+  collect: () => collectProgress(sealed),
+  applyBundle: () => { throw new Error("should not write"); },
+});
+check(
+  "wrong passphrase does not replace local progress",
+  foreign.ok === false && foreign.code === "decrypt" && /passphrase/i.test(foreign.message) &&
+  collectProgress(sealed).notes.c9.text === beforeForeign && beforeForeign === "still-local"
+);
+
+cloud.disconnect();
+check(
+  "disconnect clears gist config only",
+  cloudStore.getItem(GIST_SYNC_KEY) == null && collectProgress(cloudStore).notes.c2.text === "local-newer-note"
+);
+
+const page = await readFile(join(root, "index.html"), "utf8");
+const csp = page.match(/Content-Security-Policy" content="([^"]+)"/)?.[1] || "";
+check(
+  "csp allows the github api and keeps every other directive",
+  csp === "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'none'; form-action 'self'"
+);
+const worker = await readFile(join(root, "sw.js"), "utf8");
+check(
+  "service worker precaches gist sync and skips the github api",
+  worker.includes('const CACHE = "kc-app-v6"') &&
+  worker.includes("./js/gist-sync.js") &&
+  worker.includes('url.origin === "https://api.github.com"')
+);
 
 if (failed) {
   console.error(`${failed} failed`);

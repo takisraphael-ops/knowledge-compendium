@@ -158,6 +158,20 @@ export function applyImportedExamVersion(ver) {
   writeExamVersion(ver === "701" ? "701" : "801");
 }
 
+/**
+ * Take scheduling written by a cloud sync without leaving the current session.
+ * The hub redraws so due counts, notes-backed readiness, and the sync panel match.
+ * An open study or mock session keeps its place.
+ */
+export function adoptExternalProgress() {
+  store = loadStore();
+  if (!hooks || !isReviseVisible()) return;
+  if (view === "study" || view === "mock" || view === "mock-review") return;
+  const active = typeof document !== "undefined" ? document.activeElement : null;
+  if (active && hooks.els.revise.contains(active) && active.closest("[data-gist-root], .gist-token, .gist-id")) return;
+  render();
+}
+
 /** Reload scheduling after a progress import and return to the Revise hub. */
 export function reloadReviseFromStorage() {
   store = loadStore();
@@ -479,13 +493,14 @@ function renderHub() {
 
       <section class="rev-card-block" id="rev-progress-sync">
         <h2>Progress sync</h2>
-        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, personal notes, PBQ scores, and display preferences between devices. The compendium’s topic text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
+        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, personal notes, quick captures, PBQ scores, and display preferences between devices. The compendium’s topic text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
         <div class="rev-data-row rev-sync-row">
           <button type="button" class="tool" data-act="export">Export progress</button>
           <button type="button" class="tool" data-act="export-plain">Plain JSON</button>
           <button type="button" class="tool" data-act="import">Import progress</button>
           <button type="button" class="tool danger" data-act="reset">Reset scheduling</button>
         </div>
+        ${typeof hooks.gistSyncHtml === "function" ? hooks.gistSyncHtml() : ""}
       </section>
       </div>
     </div>
@@ -861,6 +876,7 @@ function onChange(e) {
     lensChoice = null;
     readyFocus = null;
     persistScope();
+    hooks.onStudyDataChanged?.();
     render();
   } else if (t.dataset.act === "mode") {
     scope.mode = t.value === "practice" || t.value === "keypoints" ? t.value : "flashcards";
@@ -887,6 +903,7 @@ function onInput(e) {
   t.addEventListener("change", () => {
     setNewPerDay(store, t.value);
     saveStore(store);
+    hooks.onStudyDataChanged?.();
     if (view === "hub") render();
   }, { once: true });
   void n;
@@ -916,6 +933,7 @@ function markCurrentIntroduced() {
   if (!card) return;
   markIntroduced(store, card.id);
   saveStore(store);
+  hooks.onStudyDataChanged?.();
 }
 
 function reveal() {
@@ -931,6 +949,7 @@ function applyGrade(grade) {
   if (!card) return;
   review(store, card.id, grade);
   saveStore(store);
+  hooks.onStudyDataChanged?.();
   session.done.push({ id: card.id, grade });
   if (grade === "again" && session?.kind !== "weak-spot") {
     const later = queue.slice(cursor + 1).some((c) => c.id === card.id);
@@ -983,6 +1002,7 @@ function doReset() {
   queue = [];
   render();
   hooks.onDueChange?.();
+  hooks.onStudyDataChanged?.();
   hooks.toast?.("Revision progress has been cleared.");
 }
 
@@ -1809,6 +1829,7 @@ function checkPbq() {
   try {
     recordPbqAttempt(safeStorage(), scenario.id, grade);
   } catch { /* private mode */ }
+  hooks.onStudyDataChanged?.();
   render();
   hooks.els.revise?.querySelector(".pbq-score")?.focus?.();
 }
