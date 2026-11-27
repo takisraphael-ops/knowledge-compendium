@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
   <meta name="theme-color" content="#f3f1ec">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'none'; form-action 'self'">
   <title>Knowledge Compendium</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%231f2a2e'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23f3f1ec'/%3E%3Cpath d='M16 16 L28 8 M16 16 L27 20 M16 16 L8 27 M16 16 L6 10' stroke='%237d8c86' stroke-width='1.4' fill='none'/%3E%3C/svg%3E">
   <link rel="manifest" href="manifest.webmanifest">
@@ -34,37 +34,63 @@
 
   <div id="app" hidden>
     <header>
-      <nav class="nav-line" id="nav-line" aria-label="Map location">
-        <ol class="map-breadcrumb" id="map-breadcrumb"></ol>
-        <div id="view-switch" class="view-switch" role="group" aria-label="View" hidden>
-          <button type="button" id="view-map" aria-pressed="true">Map</button>
-          <button type="button" id="view-outline" aria-pressed="false">Outline</button>
-        </div>
-        <label class="subject-switch-wrap">
-          <select id="subject-switch" aria-label="Switch subject"></select>
-        </label>
-      </nav>
-      <div class="chrome-line">
-        <div class="brand" id="brand">Knowledge Compendium</div>
-        <div class="count" id="count"></div>
-        <div class="search-wrap">
-          <input id="search" type="search" placeholder="Search topics and notes" aria-label="Search topics and notes" aria-controls="search-results" aria-autocomplete="list" aria-expanded="false" autocomplete="off">
-          <div class="match-nav">
-            <span id="match-label"></span>
-            <button type="button" id="match-prev" aria-label="Previous match">‹</button>
-            <button type="button" id="match-next" aria-label="Next match">›</button>
+      <div class="topbar">
+        <div class="topbar-identity">
+          <div class="brand-row">
+            <div class="brand" id="brand">Knowledge Compendium</div>
+            <div class="count" id="count"></div>
           </div>
-          <div id="search-results" class="search-results" hidden></div>
+          <nav class="nav-line" id="nav-line" aria-label="Map location">
+            <ol class="map-breadcrumb" id="map-breadcrumb"></ol>
+            <label class="subject-switch-wrap">
+              <select id="subject-switch" aria-label="Switch subject"></select>
+            </label>
+          </nav>
         </div>
-        <div class="tools">
-          <select id="doc-filter" aria-label="Filter by source document"></select>
-          <button type="button" class="tool" id="inbox-btn" aria-keyshortcuts="n" aria-haspopup="dialog" aria-expanded="false">Inbox<span id="inbox-count" class="inbox-count" hidden></span></button>
-          <button type="button" class="tool" id="glossary-btn">Glossary</button>
-          <button type="button" class="tool" id="revise-btn">Revise</button>
-          <button type="button" class="tool" id="edits-btn">Edits</button>
-          <button type="button" class="tool gist-status" id="gist-sync-status" hidden>Synced</button>
-          <button type="button" class="tool" id="theme-btn" aria-label="Toggle dark mode">Dark</button>
-          <button type="button" class="tool" id="lock-btn">Lock</button>
+        <div class="topbar-actions">
+          <div id="view-switch" class="view-switch" role="group" aria-label="View" hidden>
+            <button type="button" id="view-map" aria-pressed="true">Map</button>
+            <button type="button" id="view-outline" aria-pressed="false">Outline</button>
+          </div>
+          <div class="search-wrap">
+            <input id="search" type="search" placeholder="Search" aria-label="Search topics and notes" aria-keyshortcuts="Meta+K Control+K" aria-controls="search-results" aria-autocomplete="list" aria-expanded="false" autocomplete="off">
+            <span class="search-kbd" aria-hidden="true">
+              <kbd id="search-kbd-chord" class="search-kbd-chord">⌘K</kbd>
+              <kbd>/</kbd>
+            </span>
+            <div class="match-nav">
+              <span id="match-label"></span>
+              <button type="button" id="match-prev" aria-label="Previous match">‹</button>
+              <button type="button" id="match-next" aria-label="Next match">›</button>
+            </div>
+            <div id="search-results" class="search-results" hidden></div>
+          </div>
+          <div class="study-tabs" role="group" aria-label="Study">
+            <button type="button" class="tool" id="revise-btn">Revise</button>
+            <button type="button" class="tool" id="inbox-btn" aria-keyshortcuts="n" aria-haspopup="dialog" aria-expanded="false">Inbox<span id="inbox-count" class="inbox-count" hidden></span></button>
+            <button type="button" class="tool" id="glossary-btn">Glossary</button>
+          </div>
+          <div class="util-cluster">
+            <button type="button" class="util-toggle" id="util-toggle" aria-haspopup="true" aria-expanded="false" aria-controls="util-menu" aria-label="Utilities">
+              <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
+                <circle cx="4" cy="9" r="1.35" fill="currentColor"/>
+                <circle cx="9" cy="9" r="1.35" fill="currentColor"/>
+                <circle cx="14" cy="9" r="1.35" fill="currentColor"/>
+              </svg>
+            </button>
+            <div id="util-menu" class="util-menu" hidden>
+              <div class="util-field">
+                <span class="util-label">Source</span>
+                <select id="doc-filter" aria-label="Filter by source document"></select>
+              </div>
+              <div class="util-actions">
+                <button type="button" class="tool" id="edits-btn">Edits</button>
+                <button type="button" class="tool" id="theme-btn" aria-label="Toggle dark mode">Dark</button>
+                <button type="button" class="tool" id="lock-btn">Lock</button>
+                <button type="button" class="tool gist-status" id="gist-sync-status" hidden>Synced</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div id="edits-menu" class="menu" hidden></div>

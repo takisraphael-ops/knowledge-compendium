@@ -1,10 +1,13 @@
-const CACHE = "kc-app-v6";
+const CACHE = "kc-app-v7";
 const SHELL = [
   "./",
   "./index.html",
   "./manifest.webmanifest",
   "./icon.svg",
   "./css/app.css",
+  "./assets/fonts/inter-latin.woff2",
+  "./assets/fonts/newsreader-latin.woff2",
+  "./assets/fonts/jetbrains-mono-latin.woff2",
   "./js/main.js",
   "./js/model.js",
   "./js/search.js",
