@@ -71,6 +71,22 @@ import {
 import { renderNotes, renderKeyTerms, renderKeyPoints } from "../js/notes.js";
 import { parseHash } from "../js/route.js";
 import { allocateMockQuestions, domainsForVersion } from "../js/cards.js";
+import {
+  LENSES_AAD,
+  clearLensesCache,
+  loadLenses,
+  normalizeLenses,
+  normalizeWeight,
+} from "../js/lenses.js";
+import {
+  DRILL_LIMIT,
+  classifyCard,
+  lensExamVersion,
+  prioritizeDrillCards,
+  scoreLens,
+  selectLens,
+  tierFor,
+} from "../js/readiness.js";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 let failed = 0;
@@ -922,6 +938,337 @@ const rejectedPack = await loadPbqPack(aadKey, {
   fetchImpl: async () => ({ ok: true, json: async () => otherAadEnv }),
 });
 check("loader ignores an envelope whose AAD is not pbqs", rejectedPack.scenarios.length === 0 && rejectedPack.missing === true);
+
+check("lens pack AAD is lenses", LENSES_AAD === "lenses");
+check("fractional lens weight becomes percent points", normalizeWeight(0.16) === 16 && normalizeWeight(24) === 24 && normalizeWeight(0) === 0);
+const normalizedLenses = normalizeLenses({
+  version: 1,
+  lenses: [
+    {
+      id: "sy0-801",
+      title: "Security+ SY0-801",
+      exam: "SY0-801",
+      domains: [{
+        id: "1.0",
+        title: "Concepts",
+        weight: 0.16,
+        objectives: [
+          { id: "1.1", title: "Controls", nodeIds: ["c90", "c90", "bad id"], pbqIds: ["pbq-1"] },
+          { id: "1.1", title: "Duplicate", nodeIds: ["c91"] },
+        ],
+      }],
+    },
+    { id: "sy0-801", title: "Duplicate lens", domains: [] },
+    { id: "sy0-701", title: "Security+ SY0-701", exam: "SY0-701", domains: [] },
+  ],
+});
+const normObj = normalizedLenses.lenses[0].domains[0].objectives[0];
+check(
+  "lens normalizer keeps the first lens and objective",
+  normalizedLenses.lenses.map((lens) => lens.id).join() === "sy0-801,sy0-701"
+  && normalizedLenses.lenses[0].domains[0].weight === 16
+  && normalizedLenses.lenses[0].domains[0].objectives.length === 1
+  && normObj.nodeIds.join() === "c90"
+  && normObj.pbqIds.join() === "pbq-1"
+  && normalizedLenses.lenses[0].exam === "SY0-801"
+);
+check(
+  "lens selection follows the active exam",
+  selectLens(normalizedLenses.lenses, "701").id === "sy0-701"
+  && selectLens(normalizedLenses.lenses, "801").id === "sy0-801"
+  && lensExamVersion({ id: "sy0-801" }) === "801"
+  && lensExamVersion({ exam: "SY0-701" }) === "701"
+  && lensExamVersion({ id: "net-plus", exam: "N10-009" }) === ""
+);
+
+const committedLenses = JSON.parse(await readFile(join(root, "data/lenses.enc.json"), "utf8"));
+check(
+  "committed lenses.enc.json is a deflate AES-GCM envelope",
+  committedLenses.v === 1 && committedLenses.alg === "AES-GCM" && committedLenses.comp === "deflate" && typeof committedLenses.iv === "string" && committedLenses.iv.length > 0 && typeof committedLenses.ciphertext === "string" && committedLenses.ciphertext.length > 0
+);
+const lensKey = await deriveKey("lens aad passphrase", randomBytes(16), 1000, true);
+const lensPlain = {
+  version: 1,
+  lenses: [{ id: "sy0-801", title: "Security+", exam: "SY0-801", domains: [{ id: "1.0", title: "Concepts", weight: 16, objectives: [{ id: "1.1", title: "Controls", nodeIds: ["c90"], pbqIds: ["pbq-1"] }] }] }],
+};
+const lensEnv = await encryptJson(lensKey, lensPlain, "lenses", { compress: true });
+check("lens AAD envelope is deflate AES-GCM", lensEnv.v === 1 && lensEnv.alg === "AES-GCM" && lensEnv.comp === "deflate");
+const lensBack = await decryptJson(lensKey, lensEnv, "lenses");
+check("lens envelope decrypts with AAD lenses", lensBack.lenses[0].id === "sy0-801" && lensBack.lenses[0].domains[0].objectives[0].nodeIds.join() === "c90");
+let wrongLensAad = false;
+try {
+  await decryptJson(lensKey, lensEnv, "not-lenses");
+  wrongLensAad = false;
+} catch {
+  wrongLensAad = true;
+}
+check("lens envelope rejects a different AAD", wrongLensAad);
+clearLensesCache();
+let seenLensAad = "";
+const loadedLenses = await loadLenses(lensKey, {
+  fetchImpl: async () => ({ ok: true, json: async () => lensEnv }),
+  decrypt: async (key, payload, aad) => {
+    seenLensAad = aad;
+    return decryptJson(key, payload, aad);
+  },
+});
+check("loader decrypts lenses.enc.json with AAD lenses", seenLensAad === "lenses" && loadedLenses.lenses[0].domains[0].objectives[0].pbqIds.join() === "pbq-1" && loadedLenses.missing === false);
+let lensFetches = 0;
+const cachedLenses = await loadLenses(lensKey, {
+  fetchImpl: async () => {
+    lensFetches += 1;
+    return { ok: false, status: 404 };
+  },
+});
+check("lens pack stays cached until lock", lensFetches === 0 && cachedLenses === loadedLenses);
+clearLensesCache();
+const missingLenses = await loadLenses(lensKey, {
+  fetchImpl: async () => ({ ok: false, status: 404 }),
+});
+check("missing lens pack stays empty", missingLenses.lenses.length === 0 && missingLenses.missing === true);
+clearLensesCache();
+const badLensJson = await loadLenses(lensKey, {
+  fetchImpl: async () => ({ ok: true, json: async () => { throw new Error("bad"); } }),
+});
+check("bad lens envelope stays empty", badLensJson.lenses.length === 0 && badLensJson.missing === true);
+clearLensesCache();
+const otherLensEnv = await encryptJson(lensKey, lensPlain, "other-aad", { compress: true });
+const rejectedLenses = await loadLenses(lensKey, {
+  fetchImpl: async () => ({ ok: true, json: async () => otherLensEnv }),
+});
+check("loader ignores an envelope whose AAD is not lenses", rejectedLenses.lenses.length === 0 && rejectedLenses.missing === true);
+clearLensesCache();
+
+const NOW = 1_700_000_000_000;
+const DAY = 24 * 60 * 60 * 1000;
+function srs(partial) {
+  return {
+    ease: 2.5,
+    interval: 1,
+    reps: 1,
+    lapses: 0,
+    due: NOW + 10 * DAY,
+    last: NOW - DAY,
+    lastGrade: "good",
+    introducedOn: "2026-06-01",
+    ...partial,
+  };
+}
+const matureCard = srs({ interval: 21, reps: 4, lastGrade: "good" });
+const learningCard = srs({ interval: 1, lastGrade: "good" });
+const lapsedCard = srs({ interval: 0, reps: 0, lapses: 1, lastGrade: "again" });
+const dueCard = srs({ interval: 1, lastGrade: "good", due: NOW - DAY });
+check("card classes used by readiness", classifyCard(null) === "unseen" && classifyCard(matureCard) === "mature" && classifyCard(learningCard) === "learning" && classifyCard(lapsedCard) === "lapsed");
+check("readiness tiers", tierFor(null, false) === "unstarted" && tierFor(49, true) === "needs-work" && tierFor(50, true) === "building" && tierFor(79, true) === "building" && tierFor(80, true) === "ready");
+
+const sampleLens = {
+  id: "sy0-801",
+  title: "Security+ SY0-801",
+  exam: "SY0-801",
+  domains: [
+    {
+      id: "1.0",
+      title: "Concepts",
+      weight: 16,
+      objectives: [{ id: "1.1", title: "Controls", nodeIds: ["a"], pbqIds: ["p1"] }],
+    },
+    {
+      id: "2.0",
+      title: "Threats",
+      weight: 24,
+      objectives: [{ id: "2.1", title: "Malware", nodeIds: ["b"], pbqIds: [] }],
+    },
+  ],
+};
+const sampleCards = [
+  { id: "t:a:one", nodeId: "a" },
+  { id: "t:a:two", nodeId: "a" },
+  { id: "t:b:one", nodeId: "b" },
+];
+const sampleRecords = {
+  "t:a:one": matureCard,
+  "t:a:two": matureCard,
+};
+const samplePbq = { p1: { bestScore: 1, total: 2, attempts: 1, passed: false } };
+const bare = scoreLens(sampleLens, { cards: sampleCards, records: sampleRecords, pbqProgress: samplePbq, now: NOW });
+const concept = bare.domains[0];
+const threats = bare.domains[1];
+check(
+  "objective readiness mixes mature cards and a PBQ score",
+  concept.objectives[0].readiness === 83
+  && concept.objectives[0].tier === "ready"
+  && concept.objectives[0].mature === 2
+  && concept.objectives[0].pbqPct === 50
+  && threats.objectives[0].tier === "unstarted"
+  && threats.objectives[0].unseen === 1
+  && threats.objectives[0].readiness == null
+);
+check(
+  "unstarted domains count as zero in the weighted exam score",
+  concept.readiness === 83
+  && concept.tier === "ready"
+  && threats.tier === "unstarted"
+  && bare.overall.readiness === 33
+  && bare.overall.tier === "needs-work"
+  && bare.readyCount === 1
+  && bare.objectiveCount === 2
+  && bare.weakest.id === "2.0"
+);
+const withMock = scoreLens(sampleLens, {
+  cards: sampleCards,
+  records: sampleRecords,
+  pbqProgress: samplePbq,
+  now: NOW,
+  mockHistory: [
+    { examVersion: "701", domains: [{ id: "sy0-d1", correct: 0, total: 10 }] },
+    { examVersion: "801", domains: [{ id: "sy0-d2", correct: 4, total: 10 }] },
+  ],
+});
+check(
+  "mock accuracy blends into the matching domain only",
+  withMock.domains[0].readiness === 83
+  && withMock.domains[0].mockPct == null
+  && withMock.domains[1].readiness === 40
+  && withMock.domains[1].tier === "needs-work"
+  && withMock.domains[1].mockPct === 40
+  && withMock.overall.readiness === 57
+  && withMock.weakest.id === "2.0"
+);
+const blended = scoreLens(sampleLens, {
+  cards: sampleCards,
+  records: sampleRecords,
+  pbqProgress: samplePbq,
+  now: NOW,
+  mockHistory: [{ examVersion: "801", domains: [{ id: "sy0-d1", correct: 8, total: 10 }, { id: "sy0-d2", correct: 4, total: 10 }] }],
+});
+check("started domain blends study score with mock accuracy", blended.domains[0].readiness === 82 && blended.domains[0].study === 83 && blended.overall.readiness === 57);
+
+const edgeLens = {
+  id: "edge",
+  title: "Edge",
+  exam: "SY0-801",
+  domains: [{
+    id: "1.0",
+    title: "Concepts",
+    weight: 10,
+    objectives: [
+      { id: "low", title: "Low", nodeIds: ["n"], pbqIds: ["gap"] },
+      { id: "mid", title: "Mid", nodeIds: ["m1", "m2"], pbqIds: [] },
+      { id: "high", title: "High", nodeIds: ["h1", "h2"], pbqIds: ["top"] },
+      { id: "top", title: "Top", nodeIds: ["t1"], pbqIds: ["easy"] },
+    ],
+  }],
+};
+const edge = scoreLens(edgeLens, {
+  cards: [
+    { id: "q:n:1", nodeId: "n" },
+    { id: "q:m1:1", nodeId: "m1" },
+    { id: "q:m2:1", nodeId: "m2" },
+    { id: "q:h1:1", nodeId: "h1" },
+    { id: "q:h2:1", nodeId: "h2" },
+    { id: "q:t1:1", nodeId: "t1" },
+  ],
+  records: {
+    "q:n:1": learningCard,
+    "q:m1:1": matureCard,
+    "q:h1:1": matureCard,
+    "q:h2:1": learningCard,
+    "q:t1:1": matureCard,
+  },
+  pbqProgress: {
+    gap: { bestScore: 43, total: 100, attempts: 1, passed: false },
+    top: { bestScore: 82, total: 100, attempts: 1, passed: false },
+    easy: { bestScore: 60, total: 100, attempts: 1, passed: false },
+  },
+  now: NOW,
+});
+const edgeById = new Map(edge.domains[0].objectives.map((objective) => [objective.id, objective]));
+check(
+  "objective tiers follow 50 and 80",
+  edgeById.get("low").readiness === 49 && edgeById.get("low").tier === "needs-work"
+  && edgeById.get("mid").readiness === 50 && edgeById.get("mid").tier === "building"
+  && edgeById.get("high").readiness === 79 && edgeById.get("high").tier === "building"
+  && edgeById.get("top").readiness === 80 && edgeById.get("top").tier === "ready"
+);
+const counted = scoreLens({
+  id: "sy0-801",
+  exam: "SY0-801",
+  domains: [{
+    id: "4.0",
+    title: "Operations",
+    weight: 27,
+    objectives: [{ id: "4.1", title: "Tools", nodeIds: ["w", "x", "y", "z"], pbqIds: [] }],
+  }],
+}, {
+  cards: [
+    { id: "t:w:1", nodeId: "w" },
+    { id: "t:x:1", nodeId: "x" },
+    { id: "t:y:1", nodeId: "y" },
+    { id: "t:z:1", nodeId: "z" },
+  ],
+  records: {
+    "t:x:1": dueCard,
+    "t:y:1": lapsedCard,
+    "t:z:1": matureCard,
+  },
+  now: NOW,
+});
+const countedObj = counted.domains[0].objectives[0];
+check(
+  "objective counts separate unseen, learning, lapsed, mature, and due",
+  countedObj.cards === 4 && countedObj.unseen === 1 && countedObj.learning === 1 && countedObj.lapsed === 1 && countedObj.mature === 1 && countedObj.due === 1 && countedObj.readiness === 46
+);
+
+const otherCert = scoreLens({
+  id: "net-plus",
+  title: "Network+",
+  exam: "N10-009",
+  domains: [{ id: "1.0", title: "Networking", weight: 20, objectives: [{ id: "1.1", title: "Models", nodeIds: ["z"], pbqIds: [] }] }],
+}, {
+  cards: [{ id: "t:z:a", nodeId: "z" }],
+  records: { "t:z:a": matureCard },
+  mockHistory: [{ examVersion: "801", domains: [{ id: "sy0-d1", correct: 0, total: 10 }] }],
+  now: NOW,
+});
+check("a non-Security+ lens does not absorb Security+ mock rows", otherCert.domains[0].readiness === 100 && otherCert.domains[0].mockPct == null && otherCert.overall.readiness === 100);
+
+const drillObjectives = [
+  { id: "1.1", nodeIds: ["n1"], readiness: 90, domainWeight: 10, domainReadiness: 90 },
+  { id: "2.1", nodeIds: ["n2"], readiness: 10, domainWeight: 40, domainReadiness: 10 },
+  { id: "3.1", nodeIds: ["n3"], readiness: 50, domainWeight: 10, domainReadiness: 5 },
+];
+const drillCards = [
+  { id: "due-strong", nodeId: "n1" },
+  { id: "lapsed-weak", nodeId: "n2" },
+  { id: "unseen-weak", nodeId: "n2" },
+  { id: "due-weak", nodeId: "n2" },
+  { id: "unseen-weaker", nodeId: "n3" },
+  { id: "mature-ok", nodeId: "n1" },
+];
+const drillRecords = {
+  "due-strong": srs({ due: NOW - DAY, lastGrade: "good", interval: 1 }),
+  "lapsed-weak": srs({ lastGrade: "again", lapses: 1, interval: 0, reps: 0, due: NOW + 10 * DAY }),
+  "due-weak": srs({ lastGrade: "again", lapses: 2, interval: 0, reps: 0, due: NOW - 2 * DAY }),
+  "mature-ok": srs({ interval: 30, lastGrade: "easy", reps: 5, due: NOW + 10 * DAY }),
+};
+const drilled = prioritizeDrillCards({ objectives: drillObjectives, cards: drillCards, records: drillRecords, now: NOW, limit: DRILL_LIMIT });
+check(
+  "weak-spot drill takes overdue, then lapsed, then unseen in the weakest domain",
+  drilled.map((card) => card.id).join() === "due-weak,due-strong,lapsed-weak,unseen-weaker,unseen-weak"
+);
+check(
+  "weak-spot drill stops at ten cards",
+  prioritizeDrillCards({ objectives: drillObjectives, cards: drillCards, records: drillRecords, now: NOW, limit: 3 }).map((card) => card.id).join() === "due-weak,due-strong,lapsed-weak"
+);
+const withMature = prioritizeDrillCards({
+  objectives: drillObjectives,
+  cards: drillCards,
+  records: drillRecords,
+  now: NOW,
+  limit: 10,
+  includeMature: true,
+});
+check("objective drill can keep a mastered card after the weak ones", withMature.at(-1).id === "mature-ok" && withMature.length === 6);
 
 function searchFixture(nodes, notes) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
