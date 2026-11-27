@@ -36,6 +36,10 @@
     <header>
       <nav class="nav-line" id="nav-line" aria-label="Map location">
         <ol class="map-breadcrumb" id="map-breadcrumb"></ol>
+        <div id="view-switch" class="view-switch" role="group" aria-label="View" hidden>
+          <button type="button" id="view-map" aria-pressed="true">Map</button>
+          <button type="button" id="view-outline" aria-pressed="false">Outline</button>
+        </div>
         <label class="subject-switch-wrap">
           <select id="subject-switch" aria-label="Switch subject"></select>
         </label>
@@ -73,6 +77,7 @@
       <div class="map-controls left">
         <button type="button" id="expand-all">Expand all</button>
         <button type="button" id="collapse-all">Collapse all</button>
+        <button type="button" id="autofold-btn" aria-pressed="true">Auto-fold</button>
       </div>
       <div class="map-controls right">
         <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
@@ -81,6 +86,15 @@
         <button type="button" id="fit">Fit</button>
       </div>
       <p id="hint">Drag to pan. Pinch or scroll to zoom. Tap a subject to open its map.</p>
+      <div id="overview-grid" hidden></div>
+      <div id="outline-view" hidden>
+        <div class="outline-toolbar" role="toolbar" aria-label="Outline">
+          <button type="button" id="outline-expand">Expand all</button>
+          <button type="button" id="outline-collapse">Collapse all</button>
+          <button type="button" id="outline-autofold" aria-pressed="true">Auto-fold</button>
+        </div>
+        <div id="outline-tree" role="tree" aria-label="Topic outline"></div>
+      </div>
       <div id="panel-resizer" role="separator" aria-orientation="vertical" aria-label="Resize notes panel" tabindex="0" hidden></div>
       <aside id="panel" aria-label="Topic"></aside>
     </div>

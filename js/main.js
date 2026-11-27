@@ -9,7 +9,7 @@ import {
   exportRawKey,
   importRawKey,
 } from "./crypto.js";
-import { layoutMap, assignSides, assignSidesEven } from "./layout.js";
+import { layoutMap, assignSides, assignSidesEven, assignSidesRight } from "./layout.js";
 import {
   formatHash,
   parseHash,
@@ -59,7 +59,25 @@ const PALETTE = [
 
 const KEY_STORE = "kc-unlock-v1";
 const LOCK_FLAG = "kc-locked";
+const VIEW_MODE_KEY = "kc-view-mode-v1";
+const AUTOFOLD_KEY = "kc-autofold-v1";
 const DATA_BASE = new URL("../data/", import.meta.url);
+
+function readViewMode() {
+  try {
+    const v = localStorage.getItem(VIEW_MODE_KEY);
+    if (v === "map" || v === "outline") return v;
+  } catch { /* ignore */ }
+  return "map";
+}
+
+function readAutoFold() {
+  try {
+    const v = localStorage.getItem(AUTOFOLD_KEY);
+    if (v === "0" || v === "false" || v === "off") return false;
+  } catch { /* ignore */ }
+  return true;
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -95,6 +113,12 @@ const els = {
   world: $("world"),
   edges: $("edges"),
   nodes: $("nodes"),
+  overviewGrid: $("overview-grid"),
+  outlineView: $("outline-view"),
+  outlineTree: $("outline-tree"),
+  viewSwitch: $("view-switch"),
+  viewMap: $("view-map"),
+  viewOutline: $("view-outline"),
   panel: $("panel"),
   panelResizer: $("panel-resizer"),
   zoomLabel: $("zoom-label"),
@@ -138,7 +162,12 @@ const state = {
   nodeBranch: new Map(),
   viewSides: new Map(),
   redirects: {},
+  viewMode: readViewMode(),
+  autoFold: readAutoFold(),
+  outlineScrollTo: null,
 };
+
+let pathKeep = null;
 
 const nodeButtons = new Map();
 let toastTimer = 0;
@@ -161,7 +190,11 @@ function subjectBySlug(slug) {
 function sidesForCurrentView(rootId) {
   const id = rootId || layoutRoot() || state.index.rootId;
   if (state.mode === "overview") return assignSidesEven(id, state.index.children);
-  return assignSides(id, state.index.children);
+  return assignSidesRight(id, state.index.children);
+}
+
+function showingMap() {
+  return state.mode === "subject" && state.viewMode !== "outline";
 }
 
 function topicCountLabel(n) {
@@ -370,19 +403,22 @@ function editedIds() {
 }
 
 function draw() {
+  pathKeep = pathKeepSet();
   const rootId = layoutRoot();
   const sides = state.viewSides && state.viewSides.size ? state.viewSides : state.sides;
-  state.positions = layoutMap({
-    rootId,
-    children: state.index.children,
-    measure: measureOf,
-    isOpen: (id) => id === rootId || state.expanded.has(id),
-    kidsOf: visibleKids,
-    sides,
-    colors: state.colors,
-  });
-  drawEdges();
-  drawNodes();
+  if (showingMap() || state.mode === "overview") {
+    state.positions = layoutMap({
+      rootId,
+      children: state.index.children,
+      measure: measureOf,
+      isOpen: (id) => id === rootId || state.expanded.has(id),
+      kidsOf: visibleKids,
+      sides,
+      colors: state.colors,
+    });
+    drawEdges();
+    drawNodes();
+  }
   const shown = state.positions.size;
   const allTotal = state.index.byId.size;
   const subject = subjectBySlug(state.slug);
@@ -406,6 +442,8 @@ function draw() {
   els.panel.classList.toggle("open", panelOpen);
   document.body.classList.toggle("panel-open", panelOpen);
   document.body.classList.toggle("overview-mode", state.mode === "overview");
+  document.body.classList.toggle("outline-mode", state.mode === "subject" && state.viewMode === "outline");
+  syncSurface();
   if (els.panelResizer) els.panelResizer.hidden = !isDesktopPanel() || !panelOpen;
   if (state._panelWasOpen !== panelOpen && !state.userMoved) {
     requestAnimationFrame(() => { if (!state.userMoved) fit(); });
@@ -433,8 +471,10 @@ function drawEdges() {
     const dx = b.x - a.x;
     const c1 = a.x + dx * 0.55;
     const c2 = b.x - dx * 0.55;
+    const pathClass = edgePathClass(pos.id, pos.parentId);
+    const classAttr = pathClass ? ` class="${pathClass}"` : "";
     paths.push(
-      `<path d="M ${a.x.toFixed(1)} ${a.y.toFixed(1)} C ${c1.toFixed(1)} ${a.y.toFixed(1)}, ${c2.toFixed(1)} ${b.y.toFixed(1)}, ${b.x.toFixed(1)} ${b.y.toFixed(1)}" stroke="${pos.color}" />`
+      `<path${classAttr} d="M ${a.x.toFixed(1)} ${a.y.toFixed(1)} C ${c1.toFixed(1)} ${a.y.toFixed(1)}, ${c2.toFixed(1)} ${b.y.toFixed(1)}, ${b.x.toFixed(1)} ${b.y.toFixed(1)}" stroke="${pos.color}" />`
     );
   }
   let minX = -400;
@@ -501,6 +541,7 @@ function drawNodes() {
     btn.classList.toggle("current", id === current);
     btn.classList.toggle("edited", touched.has(id));
     btn.classList.toggle("dim", state.query.length >= 2 && !hits.has(id) && !state.hitAncestors.has(id));
+    btn.classList.toggle("path-dim", Boolean(pathKeep) && !pathKeep.has(id));
     btn.style.left = `${pos.x}px`;
     btn.style.top = `${pos.y}px`;
     btn.style.width = `${pos.w}px`;
@@ -783,7 +824,9 @@ function applyRoute({ fitMap = false, restore = null } = {}) {
   }
   if (state.selected) {
     for (const a of ancestorIds(state.index, state.selected)) state.expanded.add(a);
+    autoFoldAlongPath(state.selected);
     els.hint.hidden = true;
+    if (state.mode === "subject" && state.viewMode === "outline") state.outlineScrollTo = state.selected;
   }
   const viewChanged = prevMode !== state.mode || prevFocus !== state.focusId || prevSlug !== state.slug;
   if (viewChanged) {
@@ -850,7 +893,9 @@ function openSubject(slug, { focusId = null, selectedId = null, push = true, fit
   state.showOriginal = false;
   if (state.selected) {
     for (const a of ancestorIds(state.index, state.selected)) state.expanded.add(a);
+    autoFoldAlongPath(state.selected);
     els.hint.hidden = true;
+    if (state.viewMode === "outline") state.outlineScrollTo = state.selected;
   }
   if (viewChanged) {
     state.viewSides = sidesForCurrentView(state.focusId);
@@ -929,14 +974,19 @@ function select(id, { toggle = false, push = true } = {}) {
   state.depthOpen = false;
   state.fullNotesOpen = false;
   state.showOriginal = false;
-  for (const a of ancestorIds(state.index, id)) state.expanded.add(a);
   const kids = visibleKids(id);
-  if (toggle && kids.length && id !== layoutRoot()) {
-    if (state.expanded.has(id)) state.expanded.delete(id);
-    else state.expanded.add(id);
+  const canToggle = toggle && kids.length && id !== layoutRoot();
+  const closing = canToggle && state.expanded.has(id);
+  if (closing) {
+    state.expanded.delete(id);
+  } else {
+    for (const a of ancestorIds(state.index, id)) state.expanded.add(a);
+    if (canToggle) state.expanded.add(id);
+    autoFoldAlongPath(id);
   }
   els.hint.hidden = true;
   writeRoute({ push });
+  if (state.mode === "subject" && state.viewMode === "outline") state.outlineScrollTo = id;
   draw();
   renderPanel();
   revealBranch(id);
@@ -1041,6 +1091,7 @@ function renderNav() {
     const want = (state.mode === "subject" || state.mode === "revise") && state.slug ? state.slug : "";
     if (els.subjectSwitch.value !== want) els.subjectSwitch.value = want;
   }
+  updateViewSwitch();
   document.title = state.mode === "revise"
     ? "Revise · Knowledge Compendium"
     : state.mode === "glossary"
@@ -1133,6 +1184,271 @@ function revealBranch(id) {
   applyCam();
 }
 
+function pathKeepSet() {
+  if (state.mode !== "subject" || !state.selected || !state.index?.byId.has(state.selected)) return null;
+  if ((state.query || "").trim().length >= 2) return null;
+  const keep = new Set(ancestorIds(state.index, state.selected));
+  keep.add(state.selected);
+  const root = layoutRoot();
+  const open = state.selected === root || state.expanded.has(state.selected);
+  if (open) {
+    for (const kid of visibleKids(state.selected)) keep.add(kid);
+  }
+  return keep;
+}
+
+function edgePathClass(childId, parentId) {
+  if (!pathKeep) return "";
+  return pathKeep.has(childId) && pathKeep.has(parentId) ? "path-active" : "path-dim";
+}
+
+function collapseExpandedSubtree(id) {
+  if (!state.index || !id) return;
+  const stack = [id];
+  const seen = new Set();
+  while (stack.length) {
+    const cur = stack.pop();
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    state.expanded.delete(cur);
+    for (const kid of state.index.children.get(cur) || []) stack.push(kid);
+  }
+}
+
+function foldSiblingsOf(id) {
+  const parentId = state.index.byId.get(id)?.parentId;
+  if (!parentId) return;
+  for (const sib of state.index.children.get(parentId) || []) {
+    if (sib !== id) collapseExpandedSubtree(sib);
+  }
+}
+
+function autoFoldAlongPath(id) {
+  if (!state.autoFold || !state.index || !id) return;
+  if ((state.query || "").trim().length >= 2) return;
+  const root = layoutRoot();
+  const chain = [...ancestorIds(state.index, id)].reverse();
+  if (id !== root) chain.push(id);
+  for (const cur of chain) {
+    if (!cur || cur === root || cur === state.index.rootId) continue;
+    foldSiblingsOf(cur);
+  }
+}
+
+function setAutoFold(on) {
+  state.autoFold = Boolean(on);
+  try { localStorage.setItem(AUTOFOLD_KEY, state.autoFold ? "1" : "0"); } catch { /* ignore */ }
+  syncAutoFoldButtons();
+  if (state.autoFold && state.selected && state.mode === "subject") {
+    autoFoldAlongPath(state.selected);
+    draw();
+    if (showingMap() && !state.userMoved) requestAnimationFrame(() => fit());
+  }
+}
+
+function syncAutoFoldButtons() {
+  const on = state.autoFold !== false;
+  for (const id of ["autofold-btn", "outline-autofold"]) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
+function updateViewSwitch() {
+  if (!els.viewSwitch) return;
+  els.viewSwitch.hidden = state.mode !== "subject";
+  const map = state.viewMode !== "outline";
+  els.viewMap?.setAttribute("aria-pressed", map ? "true" : "false");
+  els.viewOutline?.setAttribute("aria-pressed", map ? "false" : "true");
+}
+
+function setViewMode(mode) {
+  if (mode !== "map" && mode !== "outline") return;
+  if (state.viewMode === mode) return;
+  state.viewMode = mode;
+  try { localStorage.setItem(VIEW_MODE_KEY, mode); } catch { /* ignore */ }
+  if (mode === "outline" && state.selected) state.outlineScrollTo = state.selected;
+  updateViewSwitch();
+  draw();
+  if (mode === "map") {
+    state.userMoved = false;
+    requestAnimationFrame(() => fit());
+  }
+}
+
+function syncSurface() {
+  const overview = state.mode === "overview";
+  const outline = state.mode === "subject" && state.viewMode === "outline";
+  const hideMap = overview || outline;
+  if (els.viewport) {
+    els.viewport.hidden = overview;
+    els.viewport.classList.toggle("is-concealed", outline);
+    if (hideMap) els.viewport.setAttribute("aria-hidden", "true");
+    else els.viewport.removeAttribute("aria-hidden");
+  }
+  for (const el of document.querySelectorAll(".map-controls")) el.hidden = hideMap;
+  if (els.hint) els.hint.hidden = hideMap || Boolean(state.selected);
+  if (els.overviewGrid) els.overviewGrid.hidden = !overview;
+  if (els.outlineView) els.outlineView.hidden = !outline;
+  updateViewSwitch();
+  syncAutoFoldButtons();
+  if (overview) renderOverview();
+  if (outline) renderOutline();
+  else if (els.outlineTree) els.outlineTree.dataset.key = "";
+  flushOutlineScroll();
+  syncPhoneReaderChrome();
+}
+
+function renderOverview() {
+  const grid = els.overviewGrid;
+  if (!grid || !state.index) return;
+  const root = state.index.byId.get(state.index.rootId);
+  const title = root?.title || "Knowledge Compendium";
+  const subjects = state.subjects;
+  const topics = state.index.byId.size;
+  const cards = subjects.map((subject) => {
+    const node = state.index.byId.get(subject.rootId);
+    const color = branchColor(subject.rootId);
+    const summary = String(node?.summary || "").replace(/\s+/g, " ").trim();
+    const kids = (state.index.children.get(subject.rootId) || []).filter((id) => passes(id));
+    const preview = kids.slice(0, 4);
+    const extra = kids.length - preview.length;
+    const chips = preview.map((id) => {
+      const child = state.index.byId.get(id);
+      return `<button type="button" class="ov-chip" data-ov-node="${escapeHtml(id)}">${escapeHtml(child?.title || id)}</button>`;
+    }).join("");
+    const more = extra > 0 ? `<span class="ov-more">+${extra} more</span>` : "";
+    const chipsHtml = chips || more ? `<div class="ov-chips">${chips}${more}</div>` : "";
+    const summaryHtml = summary ? `<span class="ov-summary">${escapeHtml(summary)}</span>` : "";
+    return `<article class="ov-card" style="--c:${color}" data-ov-open="${escapeHtml(subject.slug)}">
+      <button type="button" class="ov-main" data-ov-open="${escapeHtml(subject.slug)}">
+        <span class="ov-title">${escapeHtml(subject.title)}</span>
+        <span class="ov-count">${escapeHtml(topicCountLabel(subject.count))}</span>
+        ${summaryHtml}
+      </button>
+      ${chipsHtml}
+    </article>`;
+  }).join("");
+  const html = `<div class="ov-wrap">
+    <div class="ov-head">
+      <div class="ov-head-text">
+        <h1>${escapeHtml(title)}</h1>
+        <p class="ov-count-line">${subjects.length} ${subjects.length === 1 ? "subject" : "subjects"} · ${topics} ${topics === 1 ? "topic" : "topics"}</p>
+      </div>
+      <div class="ov-actions">
+        <button type="button" class="tool" data-ov-act="revise">Revise</button>
+        <button type="button" class="tool" data-ov-act="glossary">Glossary</button>
+      </div>
+    </div>
+    <div class="ov-cards">${cards}</div>
+  </div>`;
+  if (grid.dataset.key === html) return;
+  const top = grid.scrollTop;
+  grid.innerHTML = html;
+  grid.dataset.key = html;
+  grid.scrollTop = top;
+}
+
+function onOverviewClick(e) {
+  const grid = els.overviewGrid;
+  if (!grid || !grid.contains(e.target)) return;
+  const act = e.target.closest("[data-ov-act]");
+  if (act && grid.contains(act)) {
+    if (act.dataset.ovAct === "revise") openRevise({ push: true });
+    else openGlossary({ push: true });
+    return;
+  }
+  const chip = e.target.closest("[data-ov-node]");
+  if (chip && grid.contains(chip)) {
+    openNode(chip.dataset.ovNode, { push: true });
+    return;
+  }
+  const open = e.target.closest("[data-ov-open]");
+  if (open && grid.contains(open)) openSubject(open.dataset.ovOpen, { push: true });
+}
+
+function outlineRow(id, depth, seen = new Set()) {
+  if (!id || seen.has(id) || depth > 80) return "";
+  seen.add(id);
+  const node = state.index.byId.get(id);
+  if (!node) return "";
+  const kids = visibleKids(id);
+  const isRoot = id === layoutRoot();
+  const open = isRoot || state.expanded.has(id);
+  const color = branchColor(id);
+  const selected = id === state.selected ? " selected" : "";
+  const chevron = !isRoot && kids.length
+    ? `<button type="button" class="ol-chevron" data-ol-toggle="${escapeHtml(id)}" aria-expanded="${open ? "true" : "false"}" aria-label="${open ? "Collapse" : "Expand"}"><span class="chev" aria-hidden="true"></span></button>`
+    : `<span class="ol-chevron-spacer" aria-hidden="true"></span>`;
+  const badge = !open && kids.length ? `<span class="ol-badge">${kids.length}</span>` : "";
+  const row = `<div class="ol-row${selected}" role="treeitem" data-ol-id="${escapeHtml(id)}" aria-selected="${selected ? "true" : "false"}" aria-expanded="${kids.length ? String(open) : "false"}" style="--depth:${depth};--c:${color}">${chevron}<button type="button" class="ol-label" data-ol-select="${escapeHtml(id)}"><span class="dot" style="--c:${color}" aria-hidden="true"></span><span class="ol-title">${highlightTitle(node.title, state.query)}</span>${badge}</button></div>`;
+  const children = open && kids.length
+    ? `<div class="ol-children" role="group">${kids.map((kid) => outlineRow(kid, depth + 1, seen)).join("")}</div>`
+    : "";
+  return row + children;
+}
+
+function renderOutline() {
+  const tree = els.outlineTree;
+  const root = layoutRoot();
+  if (!tree || !root || !state.index) return;
+  const active = document.activeElement;
+  const focusToggle = active?.dataset?.olToggle || "";
+  const focusSelect = !focusToggle && active?.dataset?.olSelect ? active.dataset.olSelect : "";
+  const html = outlineRow(root, 0);
+  if (tree.dataset.key !== html) {
+    tree.innerHTML = html;
+    tree.dataset.key = html;
+    const restore = focusToggle
+      ? tree.querySelector(`[data-ol-toggle="${cssEscape(focusToggle)}"]`)
+      : focusSelect
+        ? tree.querySelector(`[data-ol-select="${cssEscape(focusSelect)}"]`)
+        : null;
+    restore?.focus({ preventScroll: true });
+  }
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function flushOutlineScroll() {
+  const id = state.outlineScrollTo;
+  if (!id) return;
+  state.outlineScrollTo = null;
+  if (state.mode !== "subject" || state.viewMode !== "outline") return;
+  const row = els.outlineTree?.querySelector(`[data-ol-id="${cssEscape(id)}"]`);
+  const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  row?.scrollIntoView({ block: "nearest", behavior: reduce ? "auto" : "smooth" });
+}
+
+function toggleExpanded(id) {
+  if (!id || !state.index?.byId.has(id) || id === layoutRoot()) return;
+  if (state.expanded.has(id)) {
+    state.expanded.delete(id);
+  } else {
+    for (const a of ancestorIds(state.index, id)) state.expanded.add(a);
+    state.expanded.add(id);
+    autoFoldAlongPath(id);
+  }
+  draw();
+}
+
+function onOutlineClick(e) {
+  const view = els.outlineView;
+  if (!view || !view.contains(e.target)) return;
+  const toggle = e.target.closest("[data-ol-toggle]");
+  if (toggle && view.contains(toggle)) {
+    e.preventDefault();
+    toggleExpanded(toggle.dataset.olToggle);
+    return;
+  }
+  const sel = e.target.closest("[data-ol-select]");
+  if (sel && view.contains(sel)) select(sel.dataset.olSelect, { toggle: false, push: true });
+}
+
 function expandAll() {
   if (state.mode === "overview") return;
   const root = layoutRoot();
@@ -1172,6 +1488,7 @@ function expandSubtree(id) {
     for (const kid of kids) walk(kid);
   };
   walk(id);
+  autoFoldAlongPath(id);
   draw();
 }
 
@@ -1379,11 +1696,15 @@ function syncPhoneReaderChrome() {
   const inertTargets = [
     document.querySelector("#app > header"),
     els.viewport,
+    els.overviewGrid,
+    els.outlineView,
     ...document.querySelectorAll(".map-controls, #hint"),
   ];
+  const concealMap = state.mode === "overview" || (state.mode === "subject" && state.viewMode === "outline");
   for (const el of inertTargets) {
     if (!el) continue;
-    if (on) el.setAttribute("inert", "");
+    const force = el === els.viewport && concealMap;
+    if (on || force) el.setAttribute("inert", "");
     else el.removeAttribute("inert");
   }
 }
@@ -2301,6 +2622,16 @@ function wireChrome() {
   });
   $("expand-all").addEventListener("click", expandAll);
   $("collapse-all").addEventListener("click", collapseAll);
+  $("outline-expand")?.addEventListener("click", expandAll);
+  $("outline-collapse")?.addEventListener("click", collapseAll);
+  $("autofold-btn")?.addEventListener("click", () => setAutoFold(!state.autoFold));
+  $("outline-autofold")?.addEventListener("click", () => setAutoFold(!state.autoFold));
+  els.viewMap?.addEventListener("click", () => setViewMode("map"));
+  els.viewOutline?.addEventListener("click", () => setViewMode("outline"));
+  els.overviewGrid?.addEventListener("click", onOverviewClick);
+  els.outlineView?.addEventListener("click", onOutlineClick);
+  syncAutoFoldButtons();
+  updateViewSwitch();
   $("zoom-in").addEventListener("click", () => {
     const r = els.viewport.getBoundingClientRect();
     zoomAt(r.width / 2, r.height / 2, state.cam.k * 1.15);
