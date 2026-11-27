@@ -7,19 +7,24 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { decryptJson, deriveKey, encryptJson, randomBytes } from "../js/crypto.js";
+import { buildBacklinkIndex, extractOutgoingIds } from "../js/backlinks.js";
 import {
   BOOKMARKS_KEY,
   MOCK_HISTORY_KEY,
+  NOTES_KEY,
   PASS_PCT,
   appendMockAttempt,
   buildProgressBundle,
   collectProgress,
   encryptProgress,
   mergeHistory,
+  mergeNotes,
   mergeProgress,
   pickMockQuestions,
   preferSrsCard,
   readProgressPayload,
+  sanitizeNotes,
+  upsertNote,
   weakestDomain,
   weakestDomainFromHistory,
   writeProgress,
@@ -159,6 +164,58 @@ check("searchBlob includes keyPoints", searchBlob(withPoints).includes("128-bit 
 const kpHtml = renderKeyPoints(withPoints);
 check("renderKeyPoints block", kpHtml.includes("panel-key-points") && kpHtml.includes("AES uses 128-bit blocks.") && kpHtml.includes("Drawn from the Key Points table"));
 check("renderKeyPoints empty", renderKeyPoints({ id: "z" }) === "");
+
+const withRelated = normalizeNode({ id: "rel", title: "Related", relatedIds: ["c2", "c2", "  ", 12, { id: "nope" }] });
+check("relatedIds kept", Array.isArray(withRelated.relatedIds) && withRelated.relatedIds.join() === "c2,12");
+check("relatedIds dropped when empty", !("relatedIds" in normalizeNode({ id: "x", title: "X", relatedIds: [] })));
+const relatedNodes = materialize(
+  [{ id: "rel", title: "Related", parentId: null, relatedIds: ["c2"] }],
+  emptyEdits()
+);
+check("materialize keeps relatedIds", relatedNodes[0].relatedIds.join() === "c2");
+
+const linkNodes = [
+  { id: "root", title: "Root", parentId: null, summary: "", expanded: "" },
+  { id: "c362", title: "Packet filter", parentId: "root", summary: "See #/networking/c48.", expanded: "Also `c1` and `c362`." },
+  { id: "c48", title: "Firewall", parentId: "root", summary: "", expanded: "Pairs with `#/cybersecurity/c362` and `c362` again.", relatedIds: ["c362", "missing", "c362"] },
+  { id: "c1", title: "Overview leaf", parentId: "root", summary: "Mention `nope` and c362 in prose.", expanded: "", text: "Ignore `#/networking/c48` and `c362`.", tidy: "`c48`" },
+  { id: "networking", title: "Not the branch slot", parentId: "root", summary: "", expanded: "Route `#/networking/c48` must not treat the branch as a node." },
+];
+const knownLinkIds = new Set(linkNodes.map((n) => n.id));
+check(
+  "outgoing refs from related ids, hashes, and ticks",
+  extractOutgoingIds(linkNodes[2], knownLinkIds).join() === "c362"
+);
+check(
+  "hash and tick refs skip self, unknowns, and prose",
+  extractOutgoingIds(linkNodes[1], knownLinkIds).join() === "c48,c1"
+);
+check("summary hash is a ref", extractOutgoingIds(linkNodes[4], knownLinkIds).join() === "c48");
+check("text and tidy are not scanned", extractOutgoingIds(linkNodes[3], knownLinkIds).join() === "");
+check(
+  "nested hash keeps later segments only",
+  extractOutgoingIds({ id: "other", expanded: "Open #/cybersecurity/c1/c362.", summary: "" }, knownLinkIds).join() === "c1,c362"
+);
+const linkIndex = buildBacklinkIndex(linkNodes, (node) => (
+  node.id === "c48"
+    ? { branchId: "cybersecurity", branchTitle: "Cybersecurity" }
+    : { branchId: "networking", branchTitle: "Networking" }
+));
+const packetRefs = linkIndex.get("c362");
+check(
+  "reverse index lists each referrer once",
+  packetRefs.length === 1 && packetRefs[0].id === "c48"
+);
+check(
+  "reverse index keeps title and branch",
+  packetRefs[0].title === "Firewall" && packetRefs[0].branchId === "cybersecurity" && packetRefs[0].branchTitle === "Cybersecurity"
+);
+check("unreferenced node is absent", !linkIndex.has("missing") && !linkIndex.has("root"));
+const firewallRefs = linkIndex.get("c48");
+check(
+  "cross-subject referrers are indexed",
+  firewallRefs.map((r) => r.id).join() === "c362,networking" && firewallRefs.every((r) => r.branchTitle === "Networking")
+);
 
 function chain(n, prefix) {
   const nodes = [{ id: "root", title: "Root", parentId: null }];
@@ -447,6 +504,50 @@ const legacy = {
 const legacyMerged = mergeProgress(localBundle, legacy, { replace: false });
 check("legacy srs import merges cards and keeps bookmarks", legacyMerged.srs.cards["t:c9:zeta"].reps === 8 && legacyMerged.bookmarks.includes("c1") && legacyMerged.mockHistory.length === 1);
 
+const cleanedNotes = sanitizeNotes({
+  "bad id": { text: "x", updatedAt: 1 },
+  c1: { text: "  ", updatedAt: 5 },
+  c2: { text: "keep", updatedAt: "nope" },
+  c3: { text: 12, updatedAt: 3 },
+});
+check(
+  "notes sanitize drops blanks and bad ids",
+  cleanedNotes.c2.text === "keep" && cleanedNotes.c2.updatedAt === 0 && !cleanedNotes.c1 && !cleanedNotes.c3 && !cleanedNotes["bad id"]
+);
+const noteMerged = mergeNotes(
+  { c1: { text: "local", updatedAt: 10 }, c2: { text: "newer local", updatedAt: 50 }, c3: { text: "only local", updatedAt: 1 } },
+  { c1: { text: "incoming", updatedAt: 20 }, c2: { text: "older", updatedAt: 40 }, c4: { text: "only incoming", updatedAt: 2 }, c5: { text: "   ", updatedAt: 9 } }
+);
+check("notes newest wins", noteMerged.c1.text === "incoming" && noteMerged.c1.updatedAt === 20);
+check("notes older incoming loses", noteMerged.c2.text === "newer local");
+check("notes keeps one-sided entries", noteMerged.c3.text === "only local" && noteMerged.c4.text === "only incoming" && !noteMerged.c5);
+check("notes tie keeps local", mergeNotes({ c1: { text: "local", updatedAt: 5 } }, { c1: { text: "other", updatedAt: 5 } }).c1.text === "local");
+
+const notesLocalBundle = buildProgressBundle({
+  notes: { c1: { text: "local", updatedAt: 10 }, c2: { text: "stay", updatedAt: 3 } },
+  bookmarks: ["c1"],
+});
+const notesIncomingBundle = buildProgressBundle({
+  notes: { c1: { text: "remote", updatedAt: 11 }, c9: { text: "added", updatedAt: 4 } },
+  bookmarks: ["c9"],
+});
+const notesMerged = mergeProgress(notesLocalBundle, notesIncomingBundle, { replace: false });
+check(
+  "progress merge notes newest per node",
+  notesMerged.notes.c1.text === "remote" && notesMerged.notes.c2.text === "stay" && notesMerged.notes.c9.text === "added"
+);
+const notesReplaced = mergeProgress(notesLocalBundle, notesIncomingBundle, { replace: true });
+check(
+  "progress replace takes incoming notes",
+  notesReplaced.notes.c1.text === "remote" && !notesReplaced.notes.c2 && notesReplaced.notes.c9.text === "added"
+);
+const legacyNotesMerge = mergeProgress(notesLocalBundle, legacy, { replace: false });
+const legacyNotesReplace = mergeProgress(notesLocalBundle, legacy, { replace: true });
+check(
+  "legacy progress file keeps personal notes",
+  legacyNotesMerge.notes.c1.text === "local" && legacyNotesMerge.notes.c2.text === "stay" && legacyNotesReplace.notes.c2.text === "stay"
+);
+
 const history = [
   mockAttempt({
     id: "a",
@@ -506,6 +607,11 @@ writeProgress(mem, localBundle);
 check("progress keys", mem.getItem(BOOKMARKS_KEY).includes("c1") && mem.getItem(MOCK_HISTORY_KEY).includes("old-mock"));
 const collected = collectProgress(mem);
 check("storage round trip", collected.bookmarks.includes("c1") && collected.mockHistory.length === 1 && collected.srs.cards["t:c2:local"].reps === 3);
+upsertNote(mem, "c1", "  on device ", 8);
+check("note upsert", JSON.parse(mem.getItem(NOTES_KEY)).c1.text === "  on device " && JSON.parse(mem.getItem(NOTES_KEY)).c1.updatedAt === 8);
+check("collect reads notes", collectProgress(mem).notes.c1.text === "  on device ");
+upsertNote(mem, "c1", "   ", 9);
+check("blank note deleted", mem.getItem(NOTES_KEY) == null);
 
 const progressKey = await deriveKey("progress passphrase", randomBytes(16), 1000, true);
 const secretBundle = buildProgressBundle({
@@ -514,20 +620,22 @@ const secretBundle = buildProgressBundle({
   mockHistory: [mockAttempt({ id: "enc-1", date: "2026-11-27T00:00:00.000Z" })],
   bookmarks: ["secret-token-zxq"],
   recent: [{ id: "secret-token-zxq", at: 7 }],
+  notes: { "secret-token-zxq": { text: "private scratch", updatedAt: 9 } },
   prefs: { theme: "dark", viewMode: "map", autoFold: true, examVersion: "801" },
 });
 const envelope = await encryptProgress(progressKey, secretBundle);
 const envelopeText = JSON.stringify(envelope);
-check("encrypted export is an envelope", envelope.alg === "AES-GCM" && !envelopeText.includes("secret-token-zxq"));
+check("encrypted export is an envelope", envelope.alg === "AES-GCM" && !envelopeText.includes("secret-token-zxq") && !envelopeText.includes("private scratch"));
 const decrypted = await readProgressPayload(envelopeText, progressKey);
 check(
   "encrypted round trip",
   decrypted.srs.cards["t:node:secret-token-zxq"].reps === 6 &&
   decrypted.bookmarks.includes("secret-token-zxq") &&
-  decrypted.mockHistory[0].id === "enc-1"
+  decrypted.mockHistory[0].id === "enc-1" &&
+  decrypted.notes["secret-token-zxq"].text === "private scratch"
 );
 const plainRead = await readProgressPayload(JSON.stringify(secretBundle), null);
-check("plain json import", plainRead.srs.cards["t:node:secret-token-zxq"].reps === 6 && plainRead.prefs.theme === "dark");
+check("plain json import", plainRead.srs.cards["t:node:secret-token-zxq"].reps === 6 && plainRead.prefs.theme === "dark" && plainRead.notes["secret-token-zxq"].updatedAt === 9);
 let badPass = "";
 try {
   const otherKey = await deriveKey("wrong passphrase", randomBytes(16), 1000, true);

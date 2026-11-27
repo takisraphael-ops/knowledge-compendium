@@ -39,6 +39,21 @@ export function normalizeKeyTerms(raw) {
   return out.length ? out : undefined;
 }
 
+/** Optional explicit links to other topics. Unknown ids are dropped later, at index time. */
+export function normalizeRelatedIds(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    if (typeof item !== "string" && typeof item !== "number") continue;
+    const id = String(item).trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out.length ? out : undefined;
+}
+
 /** Normalise an optional per-topic Key points list: string[]. */
 export function normalizeKeyPoints(raw) {
   if (!Array.isArray(raw)) return undefined;
@@ -90,6 +105,8 @@ export function normalizeNode(raw) {
   const sids = Array.isArray(n.sectionIds) ? n.sectionIds.map(String).filter(Boolean)
     : (n.sectionId ? [String(n.sectionId)] : []);
   if (sids.length) node.sectionIds = sids;
+  const relatedIds = normalizeRelatedIds(n.relatedIds);
+  if (relatedIds) node.relatedIds = relatedIds;
   const keyTerms = normalizeKeyTerms(n.keyTerms);
   if (keyTerms) node.keyTerms = keyTerms;
   const keyPoints = normalizeKeyPoints(n.keyPoints);

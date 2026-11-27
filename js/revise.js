@@ -407,7 +407,7 @@ function renderHub() {
 
       <section class="rev-card-block" id="rev-progress-sync">
         <h2>Progress sync</h2>
-        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, and display preferences between devices. Note text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
+        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, personal notes, and display preferences between devices. The compendium’s topic text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
         <div class="rev-data-row rev-sync-row">
           <button type="button" class="tool" data-act="export">Export progress</button>
           <button type="button" class="tool" data-act="export-plain">Plain JSON</button>

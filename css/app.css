@@ -1073,6 +1073,112 @@ h1 .added-badge { font-weight: 700; }
 .notes th { background: #f3efe6; font-weight: 700; color: #2a2620; }
 .notes tbody tr:nth-child(even) td { background: #faf8f4; }
 .subhead { font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 18px 0 8px; }
+
+.note-pip {
+  display: inline-block;
+  margin-left: 0.5em;
+  vertical-align: middle;
+  position: relative;
+  top: -2px;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--teal);
+  background: color-mix(in srgb, var(--teal) 14%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--teal) 35%, var(--line));
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+.note-pip[hidden] { display: none !important; }
+
+.my-notes {
+  margin: 22px 0 0;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  max-width: min(var(--measure), 100%);
+}
+.my-notes-bar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.my-notes-label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 750;
+  color: var(--muted);
+}
+.my-notes-status {
+  min-height: 1em;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--muted);
+}
+.my-notes textarea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  padding: 8px 10px;
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 450;
+  line-height: 1.45;
+}
+.my-notes textarea::placeholder { color: var(--muted); }
+
+.backlinks { margin: 22px 0 4px; max-width: min(var(--measure), 100%); }
+.backlinks-label {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 750;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+.backlinks-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.backlink-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12.5px;
+  font-weight: 650;
+  text-align: left;
+}
+.backlink-chip:hover { border-color: var(--teal); color: var(--teal); }
+.backlink-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 32ch;
+}
+.backlink-branch {
+  flex: none;
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--muted);
+}
+.backlink-chip:hover .backlink-branch { color: var(--teal); }
 .subtopics { display: flex; flex-direction: column; gap: 4px; }
 .subtopic {
   display: flex; gap: 8px; align-items: center;
@@ -1244,6 +1350,7 @@ h1 .added-badge { font-weight: 700; }
   #panel h1 { font-size: 1.45rem; }
   .panel-back { min-height: 44px; padding: 6px 10px 6px 6px; }
   .jump-bar .jump-link { padding: 7px 11px; font-size: 12.5px; }
+  .my-notes textarea { font-size: 16px; }
   .panel-more-btn { width: 44px; height: 44px; }
 }
 @media (min-width: 701px) {
@@ -1261,7 +1368,9 @@ h1 .added-badge { font-weight: 700; }
   #panel .full-notes,
   #panel .grokimus-open,
   #panel .key-terms,
-  #panel .term-run {
+  #panel .term-run,
+  #panel .my-notes,
+  #panel .backlinks {
     width: 100%;
     max-width: min(var(--measure), 100%);
   }
@@ -2350,9 +2459,26 @@ figure.kc-diagram figcaption {
     box-shadow: none !important;
     padding: 0 !important;
   }
-  figure.kc-diagram, table, .src-block, .panel-key-points {
+  figure.kc-diagram, table, .src-block, .panel-key-points,
+  .my-notes, .backlinks {
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+  .my-notes.is-empty,
+  .my-notes-status,
+  .note-pip { display: none !important; }
+  .my-notes textarea {
+    border: 0;
+    padding: 0;
+    background: transparent;
+    resize: none;
+    min-height: 0;
+    color: #111;
+  }
+  .backlink-chip {
+    border-color: #ccc;
+    background: #fff;
+    color: #111;
   }
 }
 
