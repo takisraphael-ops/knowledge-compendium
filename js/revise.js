@@ -2,7 +2,7 @@
  * Revision / quiz UI. Card text stays in memory after unlock.
  * Scheduling writes only ids and SM-2 fields to localStorage.
  */
-import { escapeHtml, renderNotes, sanitizeDiagramSvg } from "./notes.js";
+import { escapeHtml, frameDiagramFigure, renderNotes, sanitizeDiagramSvg } from "./notes.js";
 import { wrapPanelAbbrs } from "./abbr.js";
 import { allocateMockQuestions, collectCards, domainsForVersion, MOCK_EXAMS, SY0_VERSIONS } from "./cards.js";
 import {
@@ -1933,7 +1933,7 @@ function selectHint(scenario) {
 function pbqSvgHtml(svg) {
   const clean = sanitizeDiagramSvg(svg);
   if (!clean) return "";
-  return `<figure class="kc-diagram pbq-diagram"><div class="kc-diagram-scroll">${clean}</div></figure>`;
+  return frameDiagramFigure(clean, "pbq-diagram");
 }
 
 function choiceLabel(list, id) {
