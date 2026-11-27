@@ -2550,7 +2550,7 @@ async function importStudyProgressFile(file) {
     return;
   }
   if (!window.confirm("Import this study progress file?")) return;
-  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, mock history, bookmarks, and recent topics are combined, and each personal note keeps the newest edit.");
+  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, mock history, bookmarks, and recent topics are combined, each personal note keeps the newest edit, and each PBQ keeps its higher score.");
   try {
     if (replace) discardPersonalNoteDraft();
     else flushPersonalNote();

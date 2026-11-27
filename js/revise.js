@@ -2,7 +2,7 @@
  * Revision / quiz UI. Card text stays in memory after unlock.
  * Scheduling writes only ids and SM-2 fields to localStorage.
  */
-import { escapeHtml, renderNotes } from "./notes.js";
+import { escapeHtml, renderNotes, sanitizeDiagramSvg } from "./notes.js";
 import { wrapPanelAbbrs } from "./abbr.js";
 import { allocateMockQuestions, collectCards, domainsForVersion, MOCK_EXAMS, SY0_VERSIONS } from "./cards.js";
 import {
@@ -29,6 +29,16 @@ import {
   saveMockHistory,
   weakestDomain,
 } from "./progress.js";
+import {
+  clearPbqCache,
+  formatPbqScore,
+  gradePbq,
+  loadPbqPack,
+  loadPbqProgress,
+  recordPbqAttempt,
+  scenarioMatches,
+  shuffledOrder,
+} from "./pbq.js";
 
 const EXAM_VER_KEY = "kc-sy0-version-v1";
 const CARD_MODES = ["flashcards", "practice", "keypoints"];
@@ -45,6 +55,19 @@ let bound = false;
 let mock = null;
 let mockTimer = 0;
 let historyExpanded = false;
+let hubTab = "study";
+let pbqPack = null;
+let pbqLoading = false;
+let pbqEpoch = 0;
+let pbqRun = null;
+
+const PBQ_TYPE_LABEL = {
+  order: "Order",
+  match: "Match",
+  triage: "Triage",
+  select: "Select",
+  config: "Config",
+};
 
 export function initRevise(nextHooks) {
   hooks = nextHooks;
@@ -61,7 +84,7 @@ export function showRevise({ keepScope = false } = {}) {
   if (!hooks) return;
   store = loadStore();
   if (!keepScope) restoreScope();
-  const sticky = view === "study" || view === "summary" || view === "mock" || view === "mock-summary" || view === "mock-review";
+  const sticky = view === "study" || view === "summary" || view === "mock" || view === "mock-summary" || view === "mock-review" || view === "pbq";
   if (!sticky) view = "hub";
   const el = hooks.els.revise;
   el.hidden = false;
@@ -90,6 +113,7 @@ export function getReviseSnapshot() {
     view,
     cursor,
     revealed,
+    hubTab: hubTab === "pbq" ? "pbq" : "study",
     scope: { branchIds: [...(scope.branchIds || [])], sectionIds: [...(scope.sectionIds || [])], domainIds: [...(scope.domainIds || [])], mode: scope.mode, examVersion: scope.examVersion === "701" ? "701" : "801" },
   };
 }
@@ -97,6 +121,7 @@ export function getReviseSnapshot() {
 export function restoreRevise(snap) {
   if (!snap) return;
   if (snap.scope) scope = { ...scope, ...snap.scope };
+  if (snap.hubTab === "pbq" || snap.hubTab === "study") hubTab = snap.hubTab;
   view = snap.view || view;
   cursor = Number.isFinite(snap.cursor) ? snap.cursor : cursor;
   revealed = !!snap.revealed;
@@ -134,10 +159,16 @@ export function clearReviseSession() {
   stopMockTimer();
   mock = null;
   view = "hub";
+  hubTab = "study";
   queue = [];
   session = null;
   revealed = false;
   cursor = 0;
+  pbqEpoch += 1;
+  pbqPack = null;
+  pbqLoading = false;
+  pbqRun = null;
+  clearPbqCache();
   hideRevise();
 }
 
@@ -157,6 +188,7 @@ export function openReviseForScope({ branchId, sectionId, dueOnly = false } = {}
   }
   stopMockTimer();
   mock = null;
+  hubTab = "study";
   if (dueOnly) {
     startDueSession();
     return;
@@ -256,13 +288,20 @@ function render() {
     finishMock("time");
     return;
   }
+  if (view === "pbq" && !currentPbq()) {
+    view = "hub";
+    hubTab = "pbq";
+  }
   if (view === "study") el.innerHTML = renderStudy();
   else if (view === "summary") el.innerHTML = renderSummary();
   else if (view === "mock") el.innerHTML = renderMock();
   else if (view === "mock-summary") el.innerHTML = renderMockSummary();
   else if (view === "mock-review") el.innerHTML = renderMockReview();
+  else if (view === "pbq") el.innerHTML = renderPbq();
   else el.innerHTML = renderHub();
-  if (view === "study") {
+  if (view === "pbq") {
+    wrapPanelAbbrs(el.querySelector(".rev-study-body") || el, "cybersecurity");
+  } else if (view === "study") {
     const card = queue[cursor];
     wrapPanelAbbrs(el.querySelector(".rev-study-body") || el, card?.branchSlug || "");
   } else if (view === "mock" || view === "mock-review") {
@@ -274,6 +313,7 @@ function render() {
 }
 
 function renderHub() {
+  if (hubTab === "pbq") return renderPbqHub();
   store = store || loadStore();
   const st = appState();
   const { cards, failures } = currentCatalog();
@@ -347,10 +387,12 @@ function renderHub() {
       <button type="button" class="rev-back" data-act="leave" aria-label="Back to the map">Back</button>
       <div class="rev-top-title">
         <h1>Revise</h1>
-        <p class="rev-kicker">Flashcards, key points and practice questions, reviewed on this device only.</p>
+        <p class="rev-kicker">Flashcards, key points, practice questions, and performance-based scenarios.</p>
       </div>
     </div>
     <div class="rev-body">
+      ${revTabs()}
+      <div id="rev-tab-panel" role="tabpanel" aria-labelledby="rev-tab-study">
       <section class="rev-card-block">
         <h2>What to study</h2>
         <div class="rev-fieldset">
@@ -407,7 +449,7 @@ function renderHub() {
 
       <section class="rev-card-block" id="rev-progress-sync">
         <h2>Progress sync</h2>
-        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, personal notes, and display preferences between devices. The compendium’s topic text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
+        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, personal notes, PBQ scores, and display preferences between devices. The compendium’s topic text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
         <div class="rev-data-row rev-sync-row">
           <button type="button" class="tool" data-act="export">Export progress</button>
           <button type="button" class="tool" data-act="export-plain">Plain JSON</button>
@@ -415,6 +457,7 @@ function renderHub() {
           <button type="button" class="tool danger" data-act="reset">Reset scheduling</button>
         </div>
       </section>
+      </div>
     </div>
   </div>`;
 }
@@ -682,6 +725,28 @@ function onClick(e) {
     scope.sectionIds = scope.sectionIds.filter((id) => id !== btn.dataset.id);
     persistScope();
     render();
+  } else if (act === "hub-tab") {
+    if (!confirmLeaveMock()) return;
+    stopMockTimer();
+    mock = null;
+    hubTab = btn.dataset.tab === "pbq" ? "pbq" : "study";
+    view = "hub";
+    revealed = false;
+    render();
+  } else if (act === "pbq-open") {
+    openPbq(btn.dataset.id);
+  } else if (act === "pbq-up" || act === "pbq-down") {
+    movePbqItem(btn.dataset.id, act === "pbq-up" ? -1 : 1);
+  } else if (act === "pbq-check") {
+    checkPbq();
+  } else if (act === "pbq-retry") {
+    retryPbq();
+  } else if (act === "pbq-next") {
+    nextPbq();
+  } else if (act === "pbq-back") {
+    view = "hub";
+    hubTab = "pbq";
+    render();
   }
 }
 
@@ -722,6 +787,15 @@ function onChange(e) {
     scope.mode = t.value === "practice" || t.value === "keypoints" ? t.value : "flashcards";
     persistScope();
     render();
+  } else if (t.dataset.act === "pbq-pick") {
+    if (!pbqRun || pbqRun.grade) return;
+    pbqRun.picks[t.dataset.item] = t.value;
+  } else if (t.dataset.act === "pbq-toggle") {
+    if (!pbqRun || pbqRun.grade) return;
+    const set = new Set(pbqRun.selected);
+    if (t.checked) set.add(t.value);
+    else set.delete(t.value);
+    pbqRun.selected = [...set];
   }
 }
 
@@ -1432,6 +1506,409 @@ function confirmLeaveMock() {
   mock = null;
   view = "hub";
   return true;
+}
+
+function revTabs() {
+  const study = hubTab !== "pbq";
+  return `<div class="rev-tabs" role="tablist" aria-label="Revise">
+    <button type="button" class="rev-tab ${study ? "on" : ""}" role="tab" id="rev-tab-study" aria-selected="${study ? "true" : "false"}" aria-controls="rev-tab-panel" data-act="hub-tab" data-tab="study">Study</button>
+    <button type="button" class="rev-tab ${study ? "" : "on"}" role="tab" id="rev-tab-pbq" aria-selected="${study ? "false" : "true"}" aria-controls="rev-tab-panel" data-act="hub-tab" data-tab="pbq">PBQs</button>
+  </div>`;
+}
+
+function domainFilterHtml() {
+  const ver = scope.examVersion === "701" ? "701" : "801";
+  const boxes = domainsForVersion(ver).map((d) => {
+    const on = scope.domainIds.includes(d.id);
+    return `<label class="rev-check">
+      <input type="checkbox" data-act="domain" value="${escapeHtml(d.id)}" ${on ? "checked" : ""}>
+      <span>${escapeHtml(d.label)}</span>
+    </label>`;
+  }).join("");
+  return `<div class="rev-fieldset">
+    <div class="rev-legend">Security+ domains <span class="rev-ver-switch" role="radiogroup" aria-label="Security+ exam version">${examVersionControl()}</span> <span class="rev-hint">(optional — none means every domain)</span></div>
+    <div class="rev-checks">${boxes}</div>
+  </div>`;
+}
+
+function renderPbqHub() {
+  if (!pbqPack && !pbqLoading) {
+    pbqLoading = true;
+    void finishPbqLoad();
+  }
+  const ver = scope.examVersion === "701" ? "SY0-701" : "SY0-801";
+  let body;
+  if (!pbqPack) {
+    body = `<section class="rev-card-block" aria-busy="true">
+      <h2>Performance-based questions</h2>
+      <p class="pbq-empty" role="status">Loading scenarios…</p>
+    </section>`;
+  } else if (!pbqPack.scenarios.length) {
+    body = `<section class="rev-card-block">
+      <h2>Performance-based questions</h2>
+      ${domainFilterHtml()}
+      <p class="pbq-empty" role="status">No PBQ scenarios are available yet.</p>
+    </section>`;
+  } else {
+    const list = filteredPbqs();
+    const progress = loadPbqProgress(safeStorage());
+    const rows = list.map((scenario) => pbqPickRow(scenario, progress[scenario.id])).join("");
+    const listHtml = rows
+      ? `<div class="pbq-list">${rows}</div>`
+      : `<p class="pbq-empty" role="status">No PBQs match this exam and domain filter.</p>`;
+    body = `<section class="rev-card-block">
+      <h2>Performance-based questions</h2>
+      <p class="rev-fine">${list.length} scenario${list.length === 1 ? "" : "s"} for ${escapeHtml(ver)}. Scores stay on this device and travel with progress sync.</p>
+      ${domainFilterHtml()}
+      ${listHtml}
+    </section>`;
+  }
+  return `<div class="rev-page">
+    <div class="rev-top">
+      <button type="button" class="rev-back" data-act="leave" aria-label="Back to the map">Back</button>
+      <div class="rev-top-title">
+        <h1>Revise</h1>
+        <p class="rev-kicker">Order, match, triage, and configuration scenarios for the active Security+ exam.</p>
+      </div>
+    </div>
+    <div class="rev-body">
+      ${revTabs()}
+      <div id="rev-tab-panel" role="tabpanel" aria-labelledby="rev-tab-pbq">${body}</div>
+    </div>
+  </div>`;
+}
+
+function pbqPickRow(scenario, rec) {
+  const status = pbqStatusText(rec);
+  const passed = Boolean(rec?.passed);
+  return `<button type="button" class="pbq-pick ${passed ? "is-passed" : ""}" data-act="pbq-open" data-id="${escapeHtml(scenario.id)}">
+    <span class="pbq-pick-title">${escapeHtml(scenario.title)}</span>
+    <span class="pbq-badges">
+      ${scenario.domain ? `<span class="pbq-badge">${escapeHtml(scenario.domain)}</span>` : ""}
+      <span class="pbq-badge pbq-badge-type">${escapeHtml(PBQ_TYPE_LABEL[scenario.type] || scenario.type)}</span>
+    </span>
+    <span class="pbq-status">${escapeHtml(status)}</span>
+  </button>`;
+}
+
+function pbqStatusText(rec) {
+  if (!rec || !(rec.attempts > 0)) return "Not tried";
+  const score = formatPbqScore(rec.bestScore, rec.total);
+  const tries = `${rec.attempts} attempt${rec.attempts === 1 ? "" : "s"}`;
+  if (rec.passed) return `Passed · ${score} · ${tries}`;
+  return `Best ${score} · ${tries}`;
+}
+
+function filteredPbqs() {
+  const ver = scope.examVersion === "701" ? "701" : "801";
+  return (pbqPack?.scenarios || []).filter((scenario) => scenarioMatches(scenario, {
+    examVersion: ver,
+    domainIds: scope.domainIds,
+  }));
+}
+
+function currentPbq() {
+  if (!pbqRun || !pbqPack) return null;
+  return pbqPack.scenarios.find((scenario) => scenario.id === pbqRun.id) || null;
+}
+
+function safeStorage() {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
+
+async function finishPbqLoad() {
+  const epoch = pbqEpoch;
+  let pack;
+  try {
+    pack = await loadPbqPack(appState()?.key);
+  } catch {
+    pack = { version: 1, scenarios: [], missing: true };
+  }
+  if (epoch !== pbqEpoch) return;
+  pbqPack = pack;
+  pbqLoading = false;
+  if (isReviseVisible() && ((view === "hub" && hubTab === "pbq") || view === "pbq")) render();
+}
+
+function freshPbqRun(scenario) {
+  return {
+    id: scenario.id,
+    order: scenario.type === "order" ? shuffledOrder(scenario.items, scenario.answer) : [],
+    picks: {},
+    selected: [],
+    grade: null,
+  };
+}
+
+function openPbq(id) {
+  const scenario = (pbqPack?.scenarios || []).find((item) => item.id === id);
+  if (!scenario) return;
+  pbqRun = freshPbqRun(scenario);
+  view = "pbq";
+  render();
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function movePbqItem(id, dir) {
+  if (!pbqRun || pbqRun.grade || !id) return;
+  const order = pbqRun.order || [];
+  const i = order.indexOf(id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= order.length) return;
+  const next = order.slice();
+  const swap = next[i];
+  next[i] = next[j];
+  next[j] = swap;
+  pbqRun.order = next;
+  render();
+  const act = dir < 0 ? "pbq-up" : "pbq-down";
+  const btn = hooks.els.revise?.querySelector(`[data-act="${act}"][data-id="${CSS.escape(id)}"]`);
+  if (btn && !btn.disabled) btn.focus();
+  else hooks.els.revise?.querySelector(`[data-act="${dir < 0 ? "pbq-down" : "pbq-up"}"][data-id="${CSS.escape(id)}"]`)?.focus();
+}
+
+function responseForPbq(scenario, run) {
+  if (scenario.type === "order") return run.order || [];
+  if (scenario.type === "match" || scenario.type === "config") return run.picks || {};
+  return run.selected || [];
+}
+
+function checkPbq() {
+  const scenario = currentPbq();
+  if (!scenario || !pbqRun || pbqRun.grade) return;
+  const grade = gradePbq(scenario, responseForPbq(scenario, pbqRun));
+  pbqRun.grade = grade;
+  try {
+    recordPbqAttempt(safeStorage(), scenario.id, grade);
+  } catch { /* private mode */ }
+  render();
+  hooks.els.revise?.querySelector(".pbq-score")?.focus?.();
+}
+
+function retryPbq() {
+  const scenario = currentPbq();
+  if (!scenario) return;
+  pbqRun = freshPbqRun(scenario);
+  render();
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function nextPbq() {
+  const list = filteredPbqs();
+  if (!list.length) {
+    view = "hub";
+    hubTab = "pbq";
+    render();
+    return;
+  }
+  const index = list.findIndex((scenario) => scenario.id === pbqRun?.id);
+  const next = list[(index + 1) % list.length];
+  if (!next || next.id === pbqRun?.id) {
+    hooks.toast?.("This is the only PBQ in the current filter.");
+    pbqRun = freshPbqRun(next || currentPbq());
+    render();
+    return;
+  }
+  openPbq(next.id);
+}
+
+function renderPbq() {
+  const scenario = currentPbq();
+  if (!scenario || !pbqRun) return "";
+  const graded = Boolean(pbqRun.grade);
+  const score = graded ? formatPbqScore(pbqRun.grade.score, pbqRun.grade.total) : "";
+  const controls = scenario.type === "order"
+    ? renderPbqOrder(scenario)
+    : scenario.type === "match"
+      ? renderPbqMatch(scenario)
+      : scenario.type === "config"
+        ? renderPbqConfig(scenario)
+        : renderPbqSelect(scenario);
+  const svg = pbqSvgHtml(scenario.svg);
+  const explanation = graded && scenario.explanation
+    ? `<section class="pbq-explain"><h2>Explanation</h2>${faceHtml(scenario.explanation)}</section>`
+    : "";
+  const related = graded ? renderPbqRelated(scenario) : "";
+  const actions = graded
+    ? `<div class="rev-pbq-actions">
+        <button type="button" class="tool" data-act="pbq-retry">Try again</button>
+        <button type="button" class="solid" data-act="pbq-next">Next PBQ</button>
+      </div>`
+    : `<div class="rev-pbq-actions">
+        <button type="button" class="solid" data-act="pbq-check">Check answer</button>
+      </div>`;
+  const scoreHtml = graded
+    ? `<p class="pbq-score ${pbqRun.grade.exact ? "is-exact" : "is-partial"}" role="status" tabindex="-1">${escapeHtml(score)}</p>`
+    : "";
+  return `<div class="rev-page rev-study">
+    <div class="rev-top">
+      <button type="button" class="rev-back" data-act="pbq-back" aria-label="Back to PBQ list">Back</button>
+      <div class="rev-top-title">
+        <h1>${escapeHtml(scenario.title)}</h1>
+        <p class="rev-kicker">${escapeHtml(pbqKicker(scenario))}</p>
+      </div>
+    </div>
+    <div class="rev-body rev-study-body">
+      <article class="rev-flash pbq-card">
+        <div class="pbq-badges pbq-card-badges">
+          ${scenario.domain ? `<span class="pbq-badge">${escapeHtml(scenario.domain)}</span>` : ""}
+          <span class="pbq-badge pbq-badge-type">${escapeHtml(PBQ_TYPE_LABEL[scenario.type] || scenario.type)}</span>
+        </div>
+        ${scenario.prompt ? `<div class="rev-prose pbq-prompt">${faceHtml(scenario.prompt)}</div>` : ""}
+        ${svg}
+        ${selectHint(scenario)}
+        ${controls}
+        ${scoreHtml}
+        ${explanation}
+        ${related}
+      </article>
+      ${actions}
+    </div>
+  </div>`;
+}
+
+function pbqKicker(scenario) {
+  const ver = scope.examVersion === "701" ? "SY0-701" : "SY0-801";
+  const bits = [ver, PBQ_TYPE_LABEL[scenario.type] || scenario.type];
+  if (scenario.domain) bits.splice(1, 0, `Domain ${scenario.domain}`);
+  return bits.join(" · ");
+}
+
+function selectHint(scenario) {
+  if (scenario.type !== "triage" && scenario.type !== "select") return "";
+  const n = scenario.answer?.length || 0;
+  if (!n) return "";
+  return `<p class="pbq-hint">Select ${n}</p>`;
+}
+
+function pbqSvgHtml(svg) {
+  const clean = sanitizeDiagramSvg(svg);
+  if (!clean) return "";
+  return `<figure class="kc-diagram pbq-diagram"><div class="kc-diagram-scroll">${clean}</div></figure>`;
+}
+
+function choiceLabel(list, id) {
+  const found = (list || []).find((item) => item.id === id);
+  return found?.label || id || "";
+}
+
+function renderPbqOrder(scenario) {
+  const grade = pbqRun.grade;
+  const rows = (pbqRun.order || []).map((id, index) => {
+    const row = grade?.items?.[index];
+    const missed = Boolean(row && !row.correct);
+    const cls = !grade ? "" : row?.correct ? "is-correct" : "is-missed";
+    const expected = missed ? choiceLabel(scenario.items, row.expected) : "";
+    const label = choiceLabel(scenario.items, id);
+    const pos = index + 1;
+    const upOff = index === 0 || grade;
+    const downOff = index === (pbqRun.order.length - 1) || grade;
+    return `<li class="pbq-item ${cls}">
+      <span class="pbq-pos" aria-hidden="true">${pos}</span>
+      <span class="pbq-label">${escapeHtml(label)}</span>
+      ${grade ? `<span class="pbq-mark">${row?.correct ? "Correct" : "Missed"}</span>` : ""}
+      <span class="pbq-moves">
+        <button type="button" data-act="pbq-up" data-id="${escapeHtml(id)}" aria-label="Move ${escapeHtml(label)} up from position ${pos}" ${upOff ? "disabled" : ""}>Move up</button>
+        <button type="button" data-act="pbq-down" data-id="${escapeHtml(id)}" aria-label="Move ${escapeHtml(label)} down from position ${pos}" ${downOff ? "disabled" : ""}>Move down</button>
+      </span>
+      ${missed ? `<p class="pbq-expected">Right answer: ${escapeHtml(expected)}</p>` : ""}
+    </li>`;
+  }).join("");
+  return `<ol class="pbq-order" aria-label="Reorder these items">${rows}</ol>`;
+}
+
+function renderPbqMatch(scenario) {
+  const grade = pbqRun.grade;
+  const rows = (scenario.items || []).map((item) => {
+    const row = grade?.items?.find((entry) => entry.id === item.id);
+    const missed = Boolean(row && !row.correct);
+    const cls = !grade ? "" : row?.correct ? "is-correct" : "is-missed";
+    const expected = missed ? choiceLabel(scenario.options, row.expected) : "";
+    return `<div class="pbq-row ${cls}">
+      <label class="pbq-row-label" for="pbq-pick-${escapeHtml(item.id)}">${escapeHtml(item.label)}</label>
+      ${pbqSelect(`pbq-pick-${item.id}`, item.id, scenario.options, pbqRun.picks?.[item.id] || "", gradedDisabled())}
+      ${grade ? `<span class="pbq-mark">${row?.correct ? "Correct" : "Missed"}</span>` : ""}
+      ${missed ? `<p class="pbq-expected">Right answer: ${escapeHtml(expected)}</p>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="pbq-match">${rows}</div>`;
+}
+
+function renderPbqConfig(scenario) {
+  const grade = pbqRun.grade;
+  const rows = (scenario.items || []).map((item) => {
+    const row = grade?.items?.find((entry) => entry.id === item.id);
+    const missed = Boolean(row && !row.correct);
+    const cls = !grade ? "" : row?.correct ? "is-correct" : "is-missed";
+    const expected = missed ? choiceLabel(item.options, row.expected) : "";
+    return `<div class="pbq-row ${cls}">
+      <label class="pbq-row-label" for="pbq-pick-${escapeHtml(item.id)}">${escapeHtml(item.label)}</label>
+      ${pbqSelect(`pbq-pick-${item.id}`, item.id, item.options, pbqRun.picks?.[item.id] || "", gradedDisabled())}
+      ${grade ? `<span class="pbq-mark">${row?.correct ? "Correct" : "Missed"}</span>` : ""}
+      ${missed ? `<p class="pbq-expected">Right answer: ${escapeHtml(expected)}</p>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="pbq-config">${rows}</div>`;
+}
+
+function renderPbqSelect(scenario) {
+  const grade = pbqRun.grade;
+  const selected = new Set(pbqRun.selected || []);
+  const rows = (scenario.options || []).map((opt) => {
+    const row = grade?.items?.find((entry) => entry.id === opt.id);
+    let cls = "";
+    let mark = "";
+    let expected = "";
+    if (row?.hit) {
+      cls = "is-correct";
+      mark = "Correct";
+    } else if (row?.missed) {
+      cls = "is-missed";
+      mark = "Missed";
+      expected = "Right answer";
+    } else if (row?.extra) {
+      cls = "is-extra";
+      mark = "Not part of the answer";
+    }
+    const on = selected.has(opt.id);
+    return `<label class="pbq-option ${cls}">
+      <input type="checkbox" data-act="pbq-toggle" value="${escapeHtml(opt.id)}" ${on ? "checked" : ""} ${grade ? "disabled" : ""}>
+      <span class="pbq-label">${escapeHtml(opt.label)}</span>
+      ${mark ? `<span class="pbq-mark">${escapeHtml(mark)}</span>` : ""}
+      ${expected ? `<span class="pbq-expected">${escapeHtml(expected)}</span>` : ""}
+    </label>`;
+  }).join("");
+  return `<div class="pbq-select-list" role="group" aria-label="Select the answers">${rows}</div>`;
+}
+
+function gradedDisabled() {
+  return pbqRun?.grade ? "disabled" : "";
+}
+
+function pbqSelect(fieldId, itemId, options, value, disabled) {
+  const opts = [`<option value="">Choose…</option>`].concat((options || []).map((opt) => {
+    const on = opt.id === value ? "selected" : "";
+    return `<option value="${escapeHtml(opt.id)}" ${on}>${escapeHtml(opt.label)}</option>`;
+  }));
+  return `<select class="pbq-select" id="${escapeHtml(fieldId)}" data-act="pbq-pick" data-item="${escapeHtml(itemId)}" ${disabled}>${opts.join("")}</select>`;
+}
+
+function renderPbqRelated(scenario) {
+  const ids = scenario.relatedNodeIds || [];
+  if (!ids.length) return "";
+  const index = appState()?.index;
+  const chips = ids.map((id) => {
+    const title = index?.byId?.get(id)?.title || id;
+    if (!index?.byId?.has(id)) {
+      return `<span class="pbq-chip is-missing">${escapeHtml(title)}</span>`;
+    }
+    return `<button type="button" class="pbq-chip" data-act="open-topic" data-id="${escapeHtml(id)}">${escapeHtml(title)}</button>`;
+  }).join("");
+  return `<section class="pbq-related"><h2>Related topics</h2><div class="pbq-chips">${chips}</div></section>`;
 }
 
 function onMockKey(e) {

@@ -1,4 +1,4 @@
-const CACHE = "kc-app-v2";
+const CACHE = "kc-app-v3";
 const SHELL = [
   "./",
   "./index.html",
@@ -15,6 +15,7 @@ const SHELL = [
   "./js/revise.js",
   "./js/schedule.js",
   "./js/progress.js",
+  "./js/pbq.js",
   "./js/backlinks.js",
   "./js/glossary.js",
   "./js/abbr.js",
