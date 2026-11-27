@@ -547,7 +547,7 @@ function sanitizeOneSvg(chunk) {
   return out.outerHTML;
 }
 
-function sanitizeDiagramSvg(raw) {
+export function sanitizeDiagramSvg(raw) {
   const match = String(raw || "").match(/<svg\b[\s\S]*?<\/svg>/i);
   return match ? sanitizeOneSvg(match[0]) : "";
 }

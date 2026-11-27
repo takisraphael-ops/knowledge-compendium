@@ -1,9 +1,11 @@
 /**
  * Cross-device study progress: SRS, mock-exam history, bookmarks, recent
- * topics, personal scratch notes, and UI prefs. Compendium topic text is
- * never stored here. Personal notes are the reader's own `kc-notes-v1` map.
+ * topics, personal scratch notes, PBQ scores, and UI prefs. Compendium topic
+ * text is never stored here. Personal notes are the reader's own `kc-notes-v1`
+ * map. PBQ scores are the reader's own `kc-pbq-v1` map.
  */
 import { decryptJson, encryptJson } from "./crypto.js";
+import { loadPbqProgress, mergePbqProgress, sanitizePbqProgress, savePbqProgress } from "./pbq.js";
 import { loadStore, sanitizeScope, sanitizeStore, saveStore } from "./schedule.js";
 
 export const PROGRESS_VERSION = 1;
@@ -407,7 +409,7 @@ function stampScope(store, examVersion) {
   return store;
 }
 
-export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes, prefs, exportedAt } = {}) {
+export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes, pbq, prefs, exportedAt } = {}) {
   const normPrefs = normalizePrefs(prefs);
   const store = stampScope(sanitizeStore(srs), normPrefs.examVersion);
   const when = typeof exportedAt === "string" && exportedAt.trim() ? exportedAt : new Date().toISOString();
@@ -421,6 +423,7 @@ export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes
       .sort((a, b) => (b.at || 0) - (a.at || 0) || a.id.localeCompare(b.id))
       .slice(0, RECENT_CAP),
     notes: sanitizeNotes(notes),
+    pbq: sanitizePbqProgress(pbq),
     prefs: normPrefs,
   };
 }
@@ -428,7 +431,7 @@ export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes
 export function coerceToBundle(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw progressError("malformed");
   const legacy = !hasOwn(raw, "version") && raw.cards && typeof raw.cards === "object";
-  const versioned = raw.version === PROGRESS_VERSION && ["srs", "mockHistory", "bookmarks", "recent", "prefs", "notes"].some((k) => hasOwn(raw, k));
+  const versioned = raw.version === PROGRESS_VERSION && ["srs", "mockHistory", "bookmarks", "recent", "prefs", "notes", "pbq"].some((k) => hasOwn(raw, k));
   if (!legacy && !versioned) throw progressError("malformed");
   if (raw.version != null && raw.version !== PROGRESS_VERSION && !legacy) throw progressError("malformed");
   const prefs = sanitizePrefs(legacy ? {} : raw.prefs);
@@ -441,6 +444,7 @@ export function coerceToBundle(raw) {
     bookmarks: legacy ? [] : sanitizeBookmarks(raw.bookmarks),
     recent: legacy ? [] : sanitizeRecent(raw.recent),
     notes: legacy ? {} : sanitizeNotes(raw.notes),
+    pbq: legacy || !hasOwn(raw, "pbq") ? {} : sanitizePbqProgress(raw.pbq),
     prefs,
     has: {
       srs: legacy || hasOwn(raw, "srs"),
@@ -448,6 +452,7 @@ export function coerceToBundle(raw) {
       bookmarks: !legacy && hasOwn(raw, "bookmarks"),
       recent: !legacy && hasOwn(raw, "recent"),
       notes: !legacy && hasOwn(raw, "notes"),
+      pbq: !legacy && hasOwn(raw, "pbq"),
       prefs: !legacy && hasOwn(raw, "prefs"),
     },
     legacy: Boolean(legacy),
@@ -465,6 +470,10 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
   const notes = incoming.has?.notes === false
     ? local.notes
     : (replace ? incoming.notes : mergeNotes(local.notes, incoming.notes));
+  // A file written before PBQs existed has no `pbq` field. Leave the local map alone.
+  const pbq = incoming.has?.pbq
+    ? (replace ? incoming.pbq : mergePbqProgress(local.pbq, incoming.pbq))
+    : local.pbq;
 
   if (replace) {
     return buildProgressBundle({
@@ -474,6 +483,7 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
       bookmarks: incoming.has?.bookmarks ? incoming.bookmarks : local.bookmarks,
       recent: incoming.has?.recent ? incoming.recent : local.recent,
       notes,
+      pbq,
       prefs,
     });
   }
@@ -485,6 +495,7 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
     bookmarks: mergeBookmarks(local.bookmarks, incoming.bookmarks),
     recent: mergeRecent(local.recent, incoming.recent),
     notes,
+    pbq,
     prefs,
   });
 }
@@ -554,6 +565,7 @@ export function collectProgress(storage, { srs, theme, examVersion } = {}) {
     bookmarks: loadBookmarks(storage),
     recent: loadRecent(storage),
     notes: loadNotes(storage),
+    pbq: loadPbqProgress(storage),
     prefs,
   });
 }
@@ -566,6 +578,7 @@ export function writeProgress(storage, bundle) {
   storage.setItem(BOOKMARKS_KEY, JSON.stringify(safe.bookmarks));
   storage.setItem(RECENT_KEY, JSON.stringify(safe.recent));
   saveNotes(safe.notes, storage);
+  savePbqProgress(safe.pbq, storage);
   if (safe.prefs.theme) storage.setItem(THEME_KEY, safe.prefs.theme);
   if (safe.prefs.viewMode) storage.setItem(VIEW_MODE_KEY, safe.prefs.viewMode);
   storage.setItem(AUTOFOLD_KEY, safe.prefs.autoFold ? "1" : "0");

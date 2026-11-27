@@ -7,6 +7,18 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { decryptJson, deriveKey, encryptJson, randomBytes } from "../js/crypto.js";
+import {
+  PBQ_AAD,
+  PBQ_STORAGE_KEY,
+  clearPbqCache,
+  formatPbqScore,
+  gradePbq,
+  loadPbqPack,
+  mergePbqProgress,
+  normalizePbqPack,
+  recordPbqAttempt,
+  scenarioMatches,
+} from "../js/pbq.js";
 import { buildBacklinkIndex, extractOutgoingIds } from "../js/backlinks.js";
 import {
   BOOKMARKS_KEY,
@@ -650,6 +662,243 @@ check("malformed progress rejected", badJson === "malformed");
 let notProgress = "";
 try { await readProgressPayload(JSON.stringify({ hello: 1 }), null); } catch (err) { notProgress = err.code; }
 check("unrecognised json rejected", notProgress === "malformed");
+
+const orderRaw = {
+  id: "ord-1",
+  title: "Boot order",
+  exams: ["SY0-801", "701"],
+  domain: "1.0",
+  type: "order",
+  prompt: "Put these in **order**.",
+  svg: "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"10\" height=\"10\"/></svg>",
+  items: [
+    { id: "a", label: "Alpha" },
+    { id: "b", label: "Bravo" },
+    { id: "c", label: "Charlie" },
+    { id: "d", label: "Delta" },
+  ],
+  answer: ["a", "b", "c", "d"],
+  explanation: "Alpha comes first.",
+  relatedNodeIds: ["c90", "c90"],
+};
+const fromScenarios = normalizePbqPack({
+  version: 1,
+  scenarios: [orderRaw, { ...orderRaw, title: "Duplicate" }, { id: "essay-1", type: "essay", prompt: "no" }],
+});
+const order = fromScenarios.scenarios[0];
+check(
+  "scenarios pack keeps the first valid order PBQ",
+  fromScenarios.scenarios.length === 1 && order.title === "Boot order" && order.exams.join() === "SY0-801,SY0-701" && order.domain === "1.0" && order.prompt.includes("**order**") && order.relatedNodeIds.join() === "c90" && order.svg.includes("<svg")
+);
+const fromPbqs = normalizePbqPack({
+  pbqs: [{
+    id: "mat-1",
+    title: "Pair them",
+    exam: "801",
+    domain: "2",
+    type: "match",
+    scenario: "Match the pairs.",
+    prompts: [{ id: "p1", label: "One" }, { id: "p2", label: "Two" }],
+    options: [{ id: "o1", label: "A" }, { id: "o2", label: "B" }],
+    answer: { p1: "o1", p2: "o2" },
+    relatedNodeIds: ["c90", "bad id"],
+  }],
+});
+const match = fromPbqs.scenarios[0];
+check(
+  "pbqs alias accepts exam, scenario, and prompts",
+  fromPbqs.scenarios.length === 1 && match.type === "match" && match.exams.join() === "SY0-801" && match.domain === "2.0" && match.prompt === "Match the pairs." && match.items.map((item) => item.id).join() === "p1,p2" && match.relatedNodeIds.join() === "c90"
+);
+const triage = normalizePbqPack({
+  scenarios: [{
+    id: "tri-1",
+    title: "Triage",
+    exams: ["SY0-801"],
+    domain: "sy0-d3",
+    type: "triage",
+    prompt: "Choose the urgent ones.",
+    options: [
+      { id: "a", label: "A" },
+      { id: "b", label: "B" },
+      { id: "c", label: "C" },
+      { id: "d", label: "D" },
+    ],
+    answer: ["a", "b"],
+  }],
+}).scenarios[0];
+const select = normalizePbqPack({
+  scenarios: [{
+    id: "sel-1",
+    title: "Select",
+    exam: "SY0-701",
+    domain: "4.0",
+    type: "select",
+    prompt: "Pick the controls.",
+    options: [
+      { id: "a", label: "A" },
+      { id: "b", label: "B" },
+      { id: "c", label: "C" },
+      { id: "d", label: "D" },
+      { id: "e", label: "E" },
+    ],
+    answer: ["a", "b", "c", "d"],
+  }],
+}).scenarios[0];
+const config = normalizePbqPack({
+  scenarios: [{
+    id: "cfg-1",
+    title: "Settings",
+    exams: ["SY0-801"],
+    domain: "5.0",
+    type: "config",
+    prompt: "Set each control.",
+    items: [
+      { id: "fw", label: "Firewall" },
+      { id: "ids", label: "IDS", options: [{ id: "on", label: "On" }, { id: "off", label: "Off" }, { id: "log", label: "Log" }] },
+    ],
+    options: [{ id: "on", label: "On" }, { id: "off", label: "Off" }],
+    answer: { fw: "on", ids: "log" },
+  }],
+}).scenarios[0];
+check("config falls back to shared options", config.items[0].options.map((opt) => opt.id).join() === "on,off" && config.items[1].options.map((opt) => opt.id).join() === "on,off,log");
+check("domain filter uses sy0-d ids", scenarioMatches(order, { examVersion: "801", domainIds: ["sy0-d1"] }) && !scenarioMatches(order, { examVersion: "801", domainIds: ["sy0-d2"] }) && scenarioMatches(match, { examVersion: "801" }) && !scenarioMatches(match, { examVersion: "701" }));
+
+const orderPartial = gradePbq(order, ["a", "b", "c", "x"]);
+const orderExact = gradePbq(order, ["a", "b", "c", "d"]);
+check("order partial score", formatPbqScore(orderPartial.score, orderPartial.total) === "3/4 (75%)" && orderPartial.exact === false && orderPartial.items[3].missed && orderPartial.items[3].expected === "d");
+check("order exact score", orderExact.exact === true && orderExact.score === 4);
+const matchPartial = gradePbq(match, { p1: "o1", p2: "o1" });
+check("match partial score", formatPbqScore(matchPartial.score, matchPartial.total) === "1/2 (50%)" && matchPartial.items.find((row) => row.id === "p2").expected === "o2");
+const triagePartial = gradePbq(triage, ["a"]);
+const triageExtra = gradePbq(triage, ["a", "b", "c"]);
+const triageExact = gradePbq(triage, ["b", "a"]);
+check("triage partial score", formatPbqScore(triagePartial.score, triagePartial.total) === "1/2 (50%)" && triagePartial.items.find((row) => row.id === "b").missed);
+check("triage extras are not a full score", triageExtra.score === 1 && triageExtra.exact === false && triageExtra.items.find((row) => row.id === "c").extra);
+check("triage exact score ignores order", triageExact.exact === true && triageExact.score === 2);
+const selectPartial = gradePbq(select, ["a", "b", "c"]);
+check("select partial score", formatPbqScore(selectPartial.score, selectPartial.total) === "3/4 (75%)" && selectPartial.items.find((row) => row.id === "d").missed && selectPartial.exact === false);
+const configPartial = gradePbq(config, { fw: "on", ids: "on" });
+const configExact = gradePbq(config, { fw: "on", ids: "log" });
+check("config partial score", formatPbqScore(configPartial.score, configPartial.total) === "1/2 (50%)" && configPartial.items.find((row) => row.id === "ids").expected === "log");
+check("config exact score", configExact.exact === true && configExact.pct === 100);
+
+const mergedPbq = mergePbqProgress(
+  {
+    "pbq-1": { bestScore: 1, total: 4, attempts: 2, lastAt: 100, passed: true },
+    "pbq-local": { bestScore: 2, total: 4, attempts: 1, lastAt: 10, passed: false },
+  },
+  {
+    "pbq-1": { bestScore: 3, total: 4, attempts: 4, lastAt: 50, passed: false },
+    "pbq-2": { bestScore: 1, total: 2, attempts: 1, lastAt: 200, passed: false },
+  }
+);
+check(
+  "pbq merge keeps higher score, max attempts, newer time, and passed",
+  mergedPbq["pbq-1"].bestScore === 3 && mergedPbq["pbq-1"].attempts === 4 && mergedPbq["pbq-1"].lastAt === 100 && mergedPbq["pbq-1"].passed === true && mergedPbq["pbq-1"].total === 4 && mergedPbq["pbq-local"].bestScore === 2 && mergedPbq["pbq-2"].lastAt === 200
+);
+const withPbq = buildProgressBundle({
+  pbq: { "pbq-keep": { bestScore: 2, total: 4, attempts: 5, lastAt: 80, passed: false } },
+  bookmarks: ["c1"],
+});
+const oldProgressFile = {
+  version: 1,
+  exportedAt: "2026-01-01T00:00:00.000Z",
+  srs: withPbq.srs,
+  mockHistory: [],
+  bookmarks: ["c9"],
+  recent: [],
+  notes: {},
+  prefs: withPbq.prefs,
+};
+const keptOnMerge = mergeProgress(withPbq, oldProgressFile, { replace: false });
+const keptOnReplace = mergeProgress(withPbq, oldProgressFile, { replace: true });
+check(
+  "older progress file without pbq leaves local PBQ progress",
+  keptOnMerge.pbq["pbq-keep"].attempts === 5 && keptOnMerge.pbq["pbq-keep"].bestScore === 2 && keptOnReplace.pbq["pbq-keep"].bestScore === 2 && keptOnReplace.pbq["pbq-keep"].passed === false
+);
+const mixedPbq = mergeProgress(withPbq, buildProgressBundle({
+  pbq: { "pbq-keep": { bestScore: 4, total: 4, attempts: 1, lastAt: 90, passed: true } },
+}), { replace: false });
+check(
+  "progress merge combines PBQ maps",
+  mixedPbq.pbq["pbq-keep"].bestScore === 4 && mixedPbq.pbq["pbq-keep"].attempts === 5 && mixedPbq.pbq["pbq-keep"].lastAt === 90 && mixedPbq.pbq["pbq-keep"].passed === true
+);
+const replacedPbq = mergeProgress(withPbq, buildProgressBundle({
+  pbq: { "pbq-new": { bestScore: 1, total: 2, attempts: 1, lastAt: 3, passed: false } },
+}), { replace: true });
+check("progress replace takes the incoming PBQ map", !replacedPbq.pbq["pbq-keep"] && replacedPbq.pbq["pbq-new"].bestScore === 1);
+
+const pbqMem = memoryStorage();
+recordPbqAttempt(pbqMem, "ord-1", { score: 3, total: 4, exact: false }, 10);
+recordPbqAttempt(pbqMem, "ord-1", { score: 1, total: 4, exact: false }, 30);
+recordPbqAttempt(pbqMem, "ord-1", { score: 4, total: 4, exact: true }, 20);
+const storedPbq = JSON.parse(pbqMem.getItem(PBQ_STORAGE_KEY));
+check(
+  "pbq attempts keep the best score",
+  storedPbq["ord-1"].bestScore === 4 && storedPbq["ord-1"].attempts === 3 && storedPbq["ord-1"].lastAt === 20 && storedPbq["ord-1"].passed === true && storedPbq["ord-1"].total === 4
+);
+check("collect reads PBQ progress", collectProgress(pbqMem).pbq["ord-1"].bestScore === 4);
+
+const pbqBundle = buildProgressBundle({
+  pbq: { "pbq-secret-token-zxq": { bestScore: 3, total: 4, attempts: 2, lastAt: 9, passed: false } },
+});
+const pbqEnv = await encryptProgress(progressKey, pbqBundle);
+const pbqEnvText = JSON.stringify(pbqEnv);
+check("encrypted PBQ export hides the id", pbqEnv.alg === "AES-GCM" && !pbqEnvText.includes("pbq-secret-token-zxq"));
+const pbqBack = await readProgressPayload(pbqEnvText, progressKey);
+check(
+  "encrypted PBQ round trip",
+  pbqBack.pbq["pbq-secret-token-zxq"].bestScore === 3 && pbqBack.pbq["pbq-secret-token-zxq"].attempts === 2 && pbqBack.pbq["pbq-secret-token-zxq"].total === 4 && pbqBack.pbq["pbq-secret-token-zxq"].passed === false
+);
+const pbqPlain = await readProgressPayload(JSON.stringify(pbqBundle), null);
+check("plain PBQ import", pbqPlain.pbq["pbq-secret-token-zxq"].lastAt === 9);
+
+check("PBQ pack AAD is pbqs", PBQ_AAD === "pbqs");
+const committedPbq = JSON.parse(await readFile(join(root, "data/pbqs.enc.json"), "utf8"));
+check(
+  "committed pbqs.enc.json is a deflate AES-GCM envelope",
+  committedPbq.v === 1 && committedPbq.alg === "AES-GCM" && committedPbq.comp === "deflate" && typeof committedPbq.iv === "string" && committedPbq.iv.length > 0 && typeof committedPbq.ciphertext === "string" && committedPbq.ciphertext.length > 0
+);
+const aadKey = await deriveKey("pbq aad passphrase", randomBytes(16), 1000, true);
+const aadPlain = { version: 1, scenarios: [orderRaw] };
+const aadEnv = await encryptJson(aadKey, aadPlain, "pbqs", { compress: true });
+check("pbq AAD envelope is deflate AES-GCM", aadEnv.v === 1 && aadEnv.alg === "AES-GCM" && aadEnv.comp === "deflate");
+const aadBack = await decryptJson(aadKey, aadEnv, "pbqs");
+check("pbq envelope decrypts with AAD pbqs", aadBack.version === 1 && aadBack.scenarios[0].id === "ord-1" && aadBack.scenarios[0].answer.join() === "a,b,c,d");
+let wrongPbqAad = false;
+try {
+  await decryptJson(aadKey, aadEnv, "not-pbqs");
+  wrongPbqAad = false;
+} catch {
+  wrongPbqAad = true;
+}
+check("pbq envelope rejects a different AAD", wrongPbqAad);
+clearPbqCache();
+let seenAad = "";
+const loadedPack = await loadPbqPack(aadKey, {
+  fetchImpl: async () => ({ ok: true, json: async () => aadEnv }),
+  decrypt: async (key, payload, aad) => {
+    seenAad = aad;
+    return decryptJson(key, payload, aad);
+  },
+});
+check("loader decrypts pbqs.enc.json with AAD pbqs", seenAad === "pbqs" && loadedPack.scenarios[0].id === "ord-1" && loadedPack.missing === false);
+clearPbqCache();
+let decryptCalls = 0;
+const missingPack = await loadPbqPack(aadKey, {
+  fetchImpl: async () => ({ ok: false, status: 404 }),
+  decrypt: async () => {
+    decryptCalls += 1;
+    return {};
+  },
+});
+check("missing pbq pack stays empty", missingPack.scenarios.length === 0 && missingPack.missing === true && decryptCalls === 0);
+clearPbqCache();
+const otherAadEnv = await encryptJson(aadKey, aadPlain, "other-aad", { compress: true });
+const rejectedPack = await loadPbqPack(aadKey, {
+  fetchImpl: async () => ({ ok: true, json: async () => otherAadEnv }),
+});
+check("loader ignores an envelope whose AAD is not pbqs", rejectedPack.scenarios.length === 0 && rejectedPack.missing === true);
 
 if (failed) {
   console.error(`${failed} failed`);
