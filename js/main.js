@@ -36,7 +36,8 @@ import {
   wouldCycle,
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
-import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise } from "./revise.js";
+import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise } from "./revise.js";
+import { collectTermsForNode, keyPointsOf, parsePracticePairs } from "./cards.js";
 import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips, setGlossaryOpener } from "./abbr.js";
 import { buildGlossary, initGlossary, showGlossary, hideGlossary, isGlossaryVisible, clearGlossarySession, glossaryHash, getGlossaryEntry, glossarySlug } from "./glossary.js";
 
@@ -61,6 +62,8 @@ const KEY_STORE = "kc-unlock-v1";
 const LOCK_FLAG = "kc-locked";
 const VIEW_MODE_KEY = "kc-view-mode-v1";
 const AUTOFOLD_KEY = "kc-autofold-v1";
+const RECENT_KEY = "kc-recent-v1";
+const BOOKMARKS_KEY = "kc-bookmarks-v1";
 const DATA_BASE = new URL("../data/", import.meta.url);
 
 function readViewMode() {
@@ -165,9 +168,13 @@ const state = {
   viewMode: readViewMode(),
   autoFold: readAutoFold(),
   outlineScrollTo: null,
+  dueCount: 0,
+  lastPanelId: null,
 };
 
 let pathKeep = null;
+const cardScopeCache = new Map();
+let recentNoted = null;
 
 const nodeButtons = new Map();
 let toastTimer = 0;
@@ -359,6 +366,7 @@ function buildTermLinker(index) {
 }
 
 function rebuildDerived() {
+  cardScopeCache.clear();
   const nodes = materialize(state.baseNodes, state.edits);
   state.index = buildIndex(nodes);
   state.baseById = new Map(state.baseNodes.map((n) => [String(n.id), normalizeNode(n)]));
@@ -727,15 +735,17 @@ function openTopicFromGlossary(id) {
   else select(id, { toggle: false, push: true });
 }
 
-function openRevise({ push = true } = {}) {
+function openRevise({ push = true, branchId = null, sectionId = null, dueOnly = false } = {}) {
   if (!state.index) return;
   if (isGlossaryVisible()) hideGlossary();
   if (state.mode !== "revise") state.reviseReturn = currentRoute();
   state.mode = "revise";
   state.glossSlug = null;
   state.glossBranch = null;
+  const scoped = Boolean(branchId || sectionId || dueOnly);
+  if (scoped) openReviseForScope({ branchId, sectionId, dueOnly });
   writeRoute({ push });
-  showRevise();
+  showRevise({ keepScope: scoped });
   renderNav();
 }
 
@@ -935,6 +945,7 @@ function openNode(id, { push = true } = {}) {
 
 function clearSelection({ push = true } = {}) {
   if (!state.selected) return;
+  state.lastPanelId = state.selected;
   state.selected = null;
   state.editing = false;
   state.depthOpen = false;
@@ -1300,6 +1311,113 @@ function syncSurface() {
   syncPhoneReaderChrome();
 }
 
+function readStoredIds(key) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) || "[]");
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const id of raw) {
+      if (typeof id !== "string" || !id || id.length > 120 || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredIds(key, ids) {
+  try { localStorage.setItem(key, JSON.stringify(ids)); } catch { /* ignore */ }
+}
+
+function liveStoredIds(key, limit) {
+  const ids = readStoredIds(key).filter((id) => state.index?.byId.has(id) && id !== state.index.rootId);
+  return limit ? ids.slice(0, limit) : ids;
+}
+
+function rememberRecent(id) {
+  if (!id || !state.index?.byId.has(id) || id === state.index.rootId) return;
+  const next = [id, ...readStoredIds(RECENT_KEY).filter((x) => x !== id)].slice(0, 5);
+  writeStoredIds(RECENT_KEY, next);
+}
+
+function noteOpenedTopic(id) {
+  if (!id || recentNoted === id) return;
+  recentNoted = id;
+  rememberRecent(id);
+}
+
+function isBookmarked(id) {
+  return readStoredIds(BOOKMARKS_KEY).includes(id);
+}
+
+function toggleBookmark(id) {
+  if (!id || !state.index?.byId.has(id) || id === state.index.rootId) return;
+  const cur = readStoredIds(BOOKMARKS_KEY);
+  const next = cur.includes(id) ? cur.filter((x) => x !== id) : [id, ...cur].slice(0, 200);
+  writeStoredIds(BOOKMARKS_KEY, next);
+  renderPanel();
+  if (els.overviewGrid) els.overviewGrid.dataset.key = "";
+  if (state.mode === "overview") renderOverview();
+}
+
+function nodeHasRevisionCards(node) {
+  if (!node) return false;
+  if (keyPointsOf(node).length) return true;
+  if (collectTermsForNode(node).length) return true;
+  return parsePracticePairs(node.expanded || "").items.length > 0;
+}
+
+function topicHasRevisionCards(id) {
+  if (!id || !state.index) return false;
+  if (cardScopeCache.has(id)) return cardScopeCache.get(id);
+  if (!subjectOfNode(state.index, state.subjects, id)) {
+    cardScopeCache.set(id, false);
+    return false;
+  }
+  const seen = new Set();
+  const walk = (cur) => {
+    if (!cur || seen.has(cur)) return false;
+    seen.add(cur);
+    if (nodeHasRevisionCards(state.index.byId.get(cur))) return true;
+    for (const kid of state.index.children.get(cur) || []) {
+      if (walk(kid)) return true;
+    }
+    return false;
+  };
+  const has = walk(id);
+  cardScopeCache.set(id, has);
+  return has;
+}
+
+function continuePill(id, starred) {
+  const node = state.index.byId.get(id);
+  const color = branchColor(id);
+  const star = starred ? `<span class="ov-pill-star" aria-hidden="true">★</span>` : "";
+  return `<button type="button" class="ov-pill" data-ov-node="${escapeHtml(id)}">
+    <span class="dot" style="--c:${color}" aria-hidden="true"></span>
+    <span class="ov-pill-title">${escapeHtml(node?.title || id)}</span>
+    ${star}
+  </button>`;
+}
+
+function continueStripHtml() {
+  const bookIds = liveStoredIds(BOOKMARKS_KEY);
+  const bookSet = new Set(bookIds);
+  const recentIds = liveStoredIds(RECENT_KEY, 5).filter((id) => !bookSet.has(id));
+  if (!bookIds.length && !recentIds.length) return "";
+  const pills = [
+    ...bookIds.map((id) => continuePill(id, true)),
+    ...recentIds.map((id) => continuePill(id, false)),
+  ].join("");
+  return `<section class="ov-continue" aria-label="Continue and bookmarks">
+    <div class="ov-continue-label">Continue & Bookmarks</div>
+    <div class="ov-pills">${pills}</div>
+  </section>`;
+}
+
 function renderOverview() {
   const grid = els.overviewGrid;
   if (!grid || !state.index) return;
@@ -1307,6 +1425,10 @@ function renderOverview() {
   const title = root?.title || "Knowledge Compendium";
   const subjects = state.subjects;
   const topics = state.index.byId.size;
+  const dueN = state.dueCount || 0;
+  const dueBtn = dueN > 0
+    ? `<button type="button" class="tool ov-due" data-ov-act="due">Due today (${dueN})</button>`
+    : "";
   const cards = subjects.map((subject) => {
     const node = state.index.byId.get(subject.rootId);
     const color = branchColor(subject.rootId);
@@ -1322,11 +1444,14 @@ function renderOverview() {
     const chipsHtml = chips || more ? `<div class="ov-chips">${chips}${more}</div>` : "";
     const summaryHtml = summary ? `<span class="ov-summary">${escapeHtml(summary)}</span>` : "";
     return `<article class="ov-card" style="--c:${color}" data-ov-open="${escapeHtml(subject.slug)}">
-      <button type="button" class="ov-main" data-ov-open="${escapeHtml(subject.slug)}">
-        <span class="ov-title">${escapeHtml(subject.title)}</span>
-        <span class="ov-count">${escapeHtml(topicCountLabel(subject.count))}</span>
-        ${summaryHtml}
-      </button>
+      <div class="ov-card-top">
+        <button type="button" class="ov-main" data-ov-open="${escapeHtml(subject.slug)}">
+          <span class="ov-title">${escapeHtml(subject.title)}</span>
+          <span class="ov-count">${escapeHtml(topicCountLabel(subject.count))}</span>
+          ${summaryHtml}
+        </button>
+        <button type="button" class="ov-revise" data-ov-revise="${escapeHtml(subject.rootId)}">Revise</button>
+      </div>
       ${chipsHtml}
     </article>`;
   }).join("");
@@ -1337,10 +1462,12 @@ function renderOverview() {
         <p class="ov-count-line">${subjects.length} ${subjects.length === 1 ? "subject" : "subjects"} · ${topics} ${topics === 1 ? "topic" : "topics"}</p>
       </div>
       <div class="ov-actions">
+        ${dueBtn}
         <button type="button" class="tool" data-ov-act="revise">Revise</button>
         <button type="button" class="tool" data-ov-act="glossary">Glossary</button>
       </div>
     </div>
+    ${continueStripHtml()}
     <div class="ov-cards">${cards}</div>
   </div>`;
   if (grid.dataset.key === html) return;
@@ -1353,9 +1480,15 @@ function renderOverview() {
 function onOverviewClick(e) {
   const grid = els.overviewGrid;
   if (!grid || !grid.contains(e.target)) return;
+  const revise = e.target.closest("[data-ov-revise]");
+  if (revise && grid.contains(revise)) {
+    openRevise({ push: true, branchId: revise.dataset.ovRevise });
+    return;
+  }
   const act = e.target.closest("[data-ov-act]");
   if (act && grid.contains(act)) {
     if (act.dataset.ovAct === "revise") openRevise({ push: true });
+    else if (act.dataset.ovAct === "due") openRevise({ push: true, dueOnly: true });
     else openGlossary({ push: true });
     return;
   }
@@ -1717,6 +1850,20 @@ function jumpBarHtml(items) {
   return `<nav class="jump-bar" aria-label="On this topic">${buttons}</nav>`;
 }
 
+function panelStudyActions(id) {
+  const bits = [];
+  if (topicHasRevisionCards(id)) {
+    const kids = (state.index.children.get(id) || []).length;
+    const label = kids ? "Revise branch" : "Revise";
+    bits.push(`<button type="button" class="panel-revise" data-act="revise-branch">${label}</button>`);
+  }
+  if (id !== state.index.rootId) {
+    const on = isBookmarked(id);
+    bits.push(`<button type="button" class="icon-btn panel-star${on ? " on" : ""}" data-act="bookmark" aria-pressed="${on ? "true" : "false"}" aria-label="${on ? "Remove bookmark" : "Bookmark topic"}">${on ? "★" : "☆"}</button>`);
+  }
+  return `<div class="panel-tools">${bits.join("")}${moreMenuHtml(id)}</div>`;
+}
+
 function moreMenuHtml(id) {
   const isRoot = id === state.index.rootId;
   return `<div class="panel-more">
@@ -1746,6 +1893,7 @@ function renderPanel() {
     syncPhoneReaderChrome();
     return;
   }
+  noteOpenedTopic(id);
   const node = state.index.byId.get(id);
   const crumbs = [...ancestorIds(state.index, id)].reverse();
   const crumbHtml = crumbs
@@ -1849,7 +1997,7 @@ function renderPanel() {
           <span class="panel-back-x" aria-hidden="true">×</span>
         </button>
         <div class="crumbs">${crumbHtml}</div>
-        ${moreMenuHtml(id)}
+        ${panelStudyActions(id)}
       </div>
       <h1>${escapeHtml(node.title)}${grokBadge}</h1>
       ${jumpBarHtml(jumpItems)}
@@ -2226,7 +2374,18 @@ function onPanelClick(e) {
   const act = btn.dataset.act;
   if (act === "open") select(btn.dataset.id, { toggle: true });
   else if (act === "open-glossary") openGlossary({ push: true });
-  else if (act === "close-panel") {
+  else if (act === "bookmark") toggleBookmark(state.selected);
+  else if (act === "revise-branch") {
+    const id = state.selected;
+    const subject = subjectOfNode(state.index, state.subjects, id);
+    if (subject) {
+      openRevise({
+        push: true,
+        branchId: subject.rootId,
+        sectionId: id === subject.rootId ? null : id,
+      });
+    }
+  } else if (act === "close-panel") {
     clearSelection({ push: true });
   } else if (act === "toggle-more") {
     e.stopPropagation();
@@ -2503,6 +2662,177 @@ function wirePanelResize() {
   });
 }
 
+function isTypingTarget(el) {
+  if (!el || el === document.body || el === document.documentElement) return false;
+  const tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+
+function focusSearchFromShortcut(e) {
+  if (!els.search || els.app?.hidden) return false;
+  if (isReviseVisible() || isGlossaryVisible() || !els.modal.hidden) return false;
+  const el = document.activeElement;
+  const typing = isTypingTarget(el);
+  const chord = (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k";
+  const slash = e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey;
+  if (!chord && !slash) return false;
+  if (slash && typing) return false;
+  if (chord && typing && el !== els.search) return false;
+  e.preventDefault();
+  els.search.focus();
+  els.search.select();
+  return true;
+}
+
+function treeKeysAllowed() {
+  if (!state.index || els.app?.hidden) return false;
+  if (state.mode !== "subject") return false;
+  if (isReviseVisible() || isGlossaryVisible()) return false;
+  if (!els.modal.hidden || state.editing) return false;
+  const el = document.activeElement;
+  if (el === els.panelResizer) return false;
+  if (isTypingTarget(el)) return false;
+  return true;
+}
+
+function panelKeysAllowed() {
+  if (!state.index || els.app?.hidden) return false;
+  if (state.mode !== "subject" && state.mode !== "overview") return false;
+  if (isReviseVisible() || isGlossaryVisible()) return false;
+  if (!els.modal.hidden || state.editing) return false;
+  if (isTypingTarget(document.activeElement)) return false;
+  return true;
+}
+
+function visibleTopicIds() {
+  const root = layoutRoot();
+  if (!root) return [];
+  const out = [];
+  const walk = (id, seen) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+    const open = id === root || state.expanded.has(id);
+    if (!open) return;
+    for (const kid of visibleKids(id)) walk(kid, seen);
+  };
+  walk(root, new Set());
+  return out;
+}
+
+function moveSelection(id, { push = false } = {}) {
+  if (!id || !state.index?.byId.has(id)) return;
+  const root = layoutRoot();
+  if (state.mode === "subject" && root && id !== root && !isUnder(state.index, root, id)) return;
+  state.selected = id;
+  state.lastPanelId = id;
+  state.editing = false;
+  state.depthOpen = false;
+  state.fullNotesOpen = false;
+  state.showOriginal = false;
+  for (const a of ancestorIds(state.index, id)) state.expanded.add(a);
+  els.hint.hidden = true;
+  writeRoute({ push });
+  if (state.mode === "subject" && state.viewMode === "outline") state.outlineScrollTo = id;
+  draw();
+  renderPanel();
+  if (state.viewMode !== "outline") {
+    revealBranch(id);
+    requestAnimationFrame(() => ensureVisible(id));
+  }
+  focusSelectedTopic(id);
+}
+
+function focusSelectedTopic(id) {
+  if (state.viewMode === "outline") {
+    els.outlineTree?.querySelector(`[data-ol-select="${cssEscape(id)}"]`)?.focus({ preventScroll: true });
+    return;
+  }
+  nodeButtons.get(id)?.focus({ preventScroll: true });
+}
+
+function expandSelectedNode() {
+  const id = state.selected;
+  if (!id) return;
+  const kids = visibleKids(id);
+  if (!kids.length) return;
+  const root = layoutRoot();
+  const open = id === root || state.expanded.has(id);
+  if (!open) {
+    state.expanded.add(id);
+    draw();
+    return;
+  }
+  moveSelection(kids[0], { push: false });
+}
+
+function collapseSelectedNode() {
+  const id = state.selected;
+  if (!id) return;
+  const kids = visibleKids(id);
+  const root = layoutRoot();
+  const open = id === root || state.expanded.has(id);
+  if (id !== root && open && kids.length) {
+    state.expanded.delete(id);
+    draw();
+    return;
+  }
+  const parent = state.index.byId.get(id)?.parentId;
+  if (!parent || !state.index.byId.has(parent)) return;
+  if (root && parent !== root && !isUnder(state.index, root, parent)) return;
+  moveSelection(parent, { push: false });
+}
+
+function onTreeArrow(key) {
+  const ids = visibleTopicIds();
+  if (!ids.length) return;
+  const idx = state.selected ? ids.indexOf(state.selected) : -1;
+  if (key === "ArrowDown") {
+    const next = idx < 0 ? 0 : Math.min(ids.length - 1, idx + 1);
+    if (idx < 0 || next !== idx) moveSelection(ids[next], { push: false });
+    return;
+  }
+  if (key === "ArrowUp") {
+    const next = idx < 0 ? ids.length - 1 : Math.max(0, idx - 1);
+    if (idx < 0 || next !== idx) moveSelection(ids[next], { push: false });
+    return;
+  }
+  if (idx < 0) {
+    moveSelection(ids[0], { push: false });
+    return;
+  }
+  if (key === "ArrowRight") expandSelectedNode();
+  else collapseSelectedNode();
+}
+
+function toggleReadingPanel() {
+  if (state.selected) {
+    clearSelection({ push: false });
+    return;
+  }
+  const id = state.lastPanelId;
+  if (id && state.index?.byId.has(id)) openNode(id, { push: false });
+}
+
+function paintDueBadge() {
+  const n = state.dueCount || 0;
+  if (!els.reviseBtn) return;
+  els.reviseBtn.textContent = n > 0 ? `Revise · ${n} due` : "Revise";
+  if (n > 0) els.reviseBtn.setAttribute("aria-label", `Revise, ${n} due`);
+  else els.reviseBtn.removeAttribute("aria-label");
+}
+
+function refreshDueBadge({ redrawOverview = true } = {}) {
+  state.dueCount = getDueCount();
+  paintDueBadge();
+  if (redrawOverview && state.mode === "overview" && els.overviewGrid) {
+    els.overviewGrid.dataset.key = "";
+    renderOverview();
+  }
+}
+
 function wireChrome() {
   bindAbbrTooltips();
   initRevise({
@@ -2511,6 +2841,7 @@ function wireChrome() {
     openNode,
     leaveRevise,
     toast,
+    onDueChange: () => refreshDueBadge({ redrawOverview: false }),
   });
   initGlossary({
     els: { glossary: els.glossary, glossaryBtn: els.glossaryBtn },
@@ -2519,8 +2850,10 @@ function wireChrome() {
     openGlossary({ slug: key ? glossarySlug(key) : null, branch: branch || null, push: true });
   });
   els.reviseBtn?.addEventListener("click", () => {
-    if (state.mode === "revise") leaveRevise();
-    else openRevise({ push: true });
+    if (state.mode === "revise") {
+      if (!prepareToLeaveRevise()) return;
+      leaveRevise();
+    } else openRevise({ push: true });
   });
   els.glossaryBtn?.addEventListener("click", () => {
     if (state.mode === "glossary" && !state.glossSlug) {
@@ -2670,11 +3003,9 @@ function wireChrome() {
   });
   els.lockBtn.addEventListener("click", lock);
   document.addEventListener("keydown", (e) => {
-    const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "");
-    if (e.key === "/" && !typing) {
-      e.preventDefault();
-      els.search.focus();
-    } else if (e.key === "Escape") {
+    if (focusSearchFromShortcut(e)) return;
+    const typing = isTypingTarget(document.activeElement);
+    if (e.key === "Escape") {
       if (!els.modal.hidden) closeModal();
       else if (state.editing) {
         state.editing = false;
@@ -2688,6 +3019,14 @@ function wireChrome() {
       }
     } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && state.editing) {
       saveForm();
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      if (e.defaultPrevented || !treeKeysAllowed()) return;
+      e.preventDefault();
+      onTreeArrow(e.key);
+    } else if ((e.key === "[" || e.key === "]") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (!panelKeysAllowed()) return;
+      e.preventDefault();
+      toggleReadingPanel();
     } else if (!typing && e.key === "+" ) {
       const r = els.viewport.getBoundingClientRect();
       zoomAt(r.width / 2, r.height / 2, state.cam.k * 1.15);
@@ -2827,6 +3166,7 @@ async function openCompendium(key) {
   document.title = root?.title || "Knowledge Compendium";
   els.gate.hidden = true;
   els.app.hidden = false;
+  refreshDueBadge({ redrawOverview: false });
   if (!location.hash || location.hash === "#") {
     history.replaceState(null, "", "#/");
   }
