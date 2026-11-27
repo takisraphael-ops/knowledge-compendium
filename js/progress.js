@@ -1,6 +1,7 @@
 /**
  * Cross-device study progress: SRS, mock-exam history, bookmarks, recent
- * topics, and UI prefs. Card wording is never stored here.
+ * topics, personal scratch notes, and UI prefs. Compendium topic text is
+ * never stored here. Personal notes are the reader's own `kc-notes-v1` map.
  */
 import { decryptJson, encryptJson } from "./crypto.js";
 import { loadStore, sanitizeScope, sanitizeStore, saveStore } from "./schedule.js";
@@ -9,7 +10,9 @@ export const PROGRESS_VERSION = 1;
 export const PROGRESS_AAD = "kc-progress-v1";
 export const BOOKMARKS_KEY = "kc-bookmarks-v1";
 export const RECENT_KEY = "kc-recent-v1";
+export const NOTES_KEY = "kc-notes-v1";
 export const MOCK_HISTORY_KEY = "kc-mock-history-v1";
+export const NOTE_TEXT_CAP = 50000;
 export const THEME_KEY = "kc-theme-v1";
 export const VIEW_MODE_KEY = "kc-view-mode-v1";
 export const AUTOFOLD_KEY = "kc-autofold-v1";
@@ -66,6 +69,59 @@ export function sanitizeBookmarks(raw) {
     if (out.length >= BOOKMARK_CAP) break;
   }
   return out;
+}
+
+/** `{ [nodeId]: { text, updatedAt } }`. Blank notes are removed. */
+export function sanitizeNotes(raw) {
+  const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const out = {};
+  for (const [id, rec] of Object.entries(src)) {
+    const clean = cleanId(id);
+    if (!clean || !rec || typeof rec !== "object" || typeof rec.text !== "string") continue;
+    const text = rec.text.length > NOTE_TEXT_CAP ? rec.text.slice(0, NOTE_TEXT_CAP) : rec.text;
+    if (!text.trim()) continue;
+    const at = Number(rec.updatedAt);
+    const prev = out[clean];
+    const note = { text, updatedAt: Number.isFinite(at) ? at : 0 };
+    if (!prev || note.updatedAt >= prev.updatedAt) out[clean] = note;
+  }
+  return out;
+}
+
+/** Per-node newest `updatedAt` wins. A missing side keeps the side that has the note. */
+export function mergeNotes(current, incoming) {
+  const cur = sanitizeNotes(current);
+  const inc = sanitizeNotes(incoming);
+  const out = { ...cur };
+  for (const [id, note] of Object.entries(inc)) {
+    const prev = out[id];
+    if (!prev || note.updatedAt > prev.updatedAt) out[id] = note;
+  }
+  return out;
+}
+
+export function loadNotes(storage) {
+  return sanitizeNotes(readJson(storage, NOTES_KEY));
+}
+
+export function saveNotes(notes, storage) {
+  const safe = sanitizeNotes(notes);
+  if (storage) {
+    if (Object.keys(safe).length) storage.setItem(NOTES_KEY, JSON.stringify(safe));
+    else storage.removeItem?.(NOTES_KEY);
+  }
+  return safe;
+}
+
+/** Write one scratch note. An empty trimmed value deletes that topic's entry. */
+export function upsertNote(storage, id, text, now = Date.now()) {
+  const clean = cleanId(id);
+  const all = loadNotes(storage);
+  if (!clean) return all;
+  const body = typeof text === "string" ? text : "";
+  if (!body.trim()) delete all[clean];
+  else all[clean] = { text: body.length > NOTE_TEXT_CAP ? body.slice(0, NOTE_TEXT_CAP) : body, updatedAt: now };
+  return saveNotes(all, storage);
 }
 
 export function sanitizeRecent(raw) {
@@ -351,7 +407,7 @@ function stampScope(store, examVersion) {
   return store;
 }
 
-export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, prefs, exportedAt } = {}) {
+export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, notes, prefs, exportedAt } = {}) {
   const normPrefs = normalizePrefs(prefs);
   const store = stampScope(sanitizeStore(srs), normPrefs.examVersion);
   const when = typeof exportedAt === "string" && exportedAt.trim() ? exportedAt : new Date().toISOString();
@@ -364,6 +420,7 @@ export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, prefs
     recent: sanitizeRecent(recent)
       .sort((a, b) => (b.at || 0) - (a.at || 0) || a.id.localeCompare(b.id))
       .slice(0, RECENT_CAP),
+    notes: sanitizeNotes(notes),
     prefs: normPrefs,
   };
 }
@@ -371,7 +428,7 @@ export function buildProgressBundle({ srs, mockHistory, bookmarks, recent, prefs
 export function coerceToBundle(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw progressError("malformed");
   const legacy = !hasOwn(raw, "version") && raw.cards && typeof raw.cards === "object";
-  const versioned = raw.version === PROGRESS_VERSION && ["srs", "mockHistory", "bookmarks", "recent", "prefs"].some((k) => hasOwn(raw, k));
+  const versioned = raw.version === PROGRESS_VERSION && ["srs", "mockHistory", "bookmarks", "recent", "prefs", "notes"].some((k) => hasOwn(raw, k));
   if (!legacy && !versioned) throw progressError("malformed");
   if (raw.version != null && raw.version !== PROGRESS_VERSION && !legacy) throw progressError("malformed");
   const prefs = sanitizePrefs(legacy ? {} : raw.prefs);
@@ -383,12 +440,14 @@ export function coerceToBundle(raw) {
     mockHistory: legacy ? [] : sanitizeHistory(raw.mockHistory),
     bookmarks: legacy ? [] : sanitizeBookmarks(raw.bookmarks),
     recent: legacy ? [] : sanitizeRecent(raw.recent),
+    notes: legacy ? {} : sanitizeNotes(raw.notes),
     prefs,
     has: {
       srs: legacy || hasOwn(raw, "srs"),
       mockHistory: !legacy && hasOwn(raw, "mockHistory"),
       bookmarks: !legacy && hasOwn(raw, "bookmarks"),
       recent: !legacy && hasOwn(raw, "recent"),
+      notes: !legacy && hasOwn(raw, "notes"),
       prefs: !legacy && hasOwn(raw, "prefs"),
     },
     legacy: Boolean(legacy),
@@ -403,6 +462,9 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
   if (incoming.prefs.viewMode) prefs.viewMode = incoming.prefs.viewMode;
   if (typeof incoming.prefs.autoFold === "boolean") prefs.autoFold = incoming.prefs.autoFold;
   if (incoming.prefs.examVersion) prefs.examVersion = incoming.prefs.examVersion;
+  const notes = incoming.has?.notes === false
+    ? local.notes
+    : (replace ? incoming.notes : mergeNotes(local.notes, incoming.notes));
 
   if (replace) {
     return buildProgressBundle({
@@ -411,6 +473,7 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
       mockHistory: incoming.has?.mockHistory ? incoming.mockHistory : local.mockHistory,
       bookmarks: incoming.has?.bookmarks ? incoming.bookmarks : local.bookmarks,
       recent: incoming.has?.recent ? incoming.recent : local.recent,
+      notes,
       prefs,
     });
   }
@@ -421,6 +484,7 @@ export function mergeProgress(localBundle, incomingRaw, { replace = false } = {}
     mockHistory: mergeHistory(local.mockHistory, incoming.mockHistory),
     bookmarks: mergeBookmarks(local.bookmarks, incoming.bookmarks),
     recent: mergeRecent(local.recent, incoming.recent),
+    notes,
     prefs,
   });
 }
@@ -489,6 +553,7 @@ export function collectProgress(storage, { srs, theme, examVersion } = {}) {
     mockHistory: loadMockHistory(storage),
     bookmarks: loadBookmarks(storage),
     recent: loadRecent(storage),
+    notes: loadNotes(storage),
     prefs,
   });
 }
@@ -500,6 +565,7 @@ export function writeProgress(storage, bundle) {
   storage.setItem(MOCK_HISTORY_KEY, JSON.stringify(safe.mockHistory));
   storage.setItem(BOOKMARKS_KEY, JSON.stringify(safe.bookmarks));
   storage.setItem(RECENT_KEY, JSON.stringify(safe.recent));
+  saveNotes(safe.notes, storage);
   if (safe.prefs.theme) storage.setItem(THEME_KEY, safe.prefs.theme);
   if (safe.prefs.viewMode) storage.setItem(VIEW_MODE_KEY, safe.prefs.viewMode);
   storage.setItem(AUTOFOLD_KEY, safe.prefs.autoFold ? "1" : "0");

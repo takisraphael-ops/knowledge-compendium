@@ -36,16 +36,20 @@ import {
   wouldCycle,
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
+import { buildBacklinkIndex } from "./backlinks.js";
 import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise, getReviseStore, reloadReviseFromStorage, applyImportedExamVersion, currentExamVersion } from "./revise.js";
 import { collectTermsForNode, keyPointsOf, parsePracticePairs } from "./cards.js";
 import {
+  cleanId,
   collectProgress,
   encryptProgress,
   isEncryptedEnvelope,
   loadMockHistory,
+  loadNotes,
   mergeProgress,
   pushRecent,
   readProgressPayload,
+  upsertNote,
   writeProgress,
 } from "./progress.js";
 import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips, setGlossaryOpener } from "./abbr.js";
@@ -181,6 +185,7 @@ const state = {
   outlineScrollTo: null,
   dueCount: 0,
   lastPanelId: null,
+  backlinks: new Map(),
 };
 
 let pathKeep = null;
@@ -190,6 +195,9 @@ let recentNoted = null;
 const nodeButtons = new Map();
 let toastTimer = 0;
 let searchTimer = 0;
+let noteTimer = 0;
+let noteDraft = null;
+const NOTE_SAVE_MS = 400;
 let measureCtx = null;
 let routeApplying = false;
 
@@ -401,6 +409,30 @@ function rebuildDerived() {
   setTermLinker(state.index ? buildTermLinker(state.index) : null);
   setAbbrIndex(buildAbbrIndex(state.index, { subjects: state.subjects, nodeBranch: state.nodeBranch }));
   buildGlossary(state.index, { subjects: state.subjects, nodeBranch: state.nodeBranch });
+  rebuildBacklinks();
+}
+
+function branchInfo(nodeId) {
+  if (!state.index) return { branchId: "", branchTitle: "" };
+  const subject = subjectOfNode(state.index, state.subjects, nodeId);
+  if (subject) {
+    return {
+      branchId: subject.branchId || subject.slug || "",
+      branchTitle: subject.title || subject.slug || "",
+    };
+  }
+  const branchId = state.nodeBranch.get(nodeId) || "";
+  const root = state.index.byId.get(state.index.rootId);
+  return { branchId, branchTitle: root?.title || "" };
+}
+
+function rebuildBacklinks() {
+  if (!state.index) {
+    state.backlinks = new Map();
+    return;
+  }
+  const nodes = state.index.order.map((id) => state.index.byId.get(id));
+  state.backlinks = buildBacklinkIndex(nodes, (node) => branchInfo(node.id));
 }
 
 function branchColor(id) {
@@ -1899,7 +1931,86 @@ function moreMenuHtml(id) {
     </div>`;
 }
 
+function schedulePersonalNote(id, text) {
+  noteDraft = { id, text };
+  const status = $("my-notes-status");
+  if (status) status.textContent = "";
+  const section = $("panel-my-notes");
+  if (section) section.classList.toggle("is-empty", !String(text || "").trim());
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => flushPersonalNote(), NOTE_SAVE_MS);
+}
+
+function flushPersonalNote() {
+  clearTimeout(noteTimer);
+  noteTimer = 0;
+  if (!noteDraft) return;
+  const { id, text } = noteDraft;
+  try {
+    upsertNote(localStorage, id, text);
+  } catch {
+    if (state.selected === id) {
+      const status = $("my-notes-status");
+      if (status) status.textContent = "Not saved";
+    }
+    return;
+  }
+  noteDraft = null;
+  if (state.selected !== id) return;
+  const status = $("my-notes-status");
+  if (status) status.textContent = "Saved";
+  const pip = $("note-pip");
+  if (pip) pip.hidden = !String(text || "").trim();
+}
+
+function discardPersonalNoteDraft() {
+  noteDraft = null;
+  clearTimeout(noteTimer);
+  noteTimer = 0;
+}
+
+function onPersonalNoteInput(e) {
+  if (e.target?.id !== "my-notes-text") return;
+  const id = state.selected;
+  if (!id) return;
+  schedulePersonalNote(id, e.target.value);
+}
+
+function savedNote(id) {
+  return loadNotes(localStorage)[cleanId(id)] || null;
+}
+
+function notePipHtml(id) {
+  const has = Boolean(savedNote(id)?.text?.trim());
+  return `<span class="note-pip" id="note-pip"${has ? "" : " hidden"} title="You have a note on this topic">Note</span>`;
+}
+
+function personalNoteHtml(id) {
+  const text = savedNote(id)?.text || "";
+  const empty = text.trim() ? "" : " is-empty";
+  return `<section class="my-notes${empty}" id="panel-my-notes">
+    <div class="my-notes-bar">
+      <label class="my-notes-label" for="my-notes-text">My notes</label>
+      <span class="my-notes-status" id="my-notes-status" aria-live="polite"></span>
+    </div>
+    <textarea id="my-notes-text" rows="3" placeholder="Scratch note for this topic">${escapeHtml(text)}</textarea>
+  </section>`;
+}
+
+function backlinksHtml(id) {
+  const list = state.backlinks?.get(id) || [];
+  if (!list.length) return "";
+  const here = branchInfo(id).branchId;
+  const chips = list.map((ref) => {
+    const cross = ref.branchId && ref.branchId !== here && ref.branchTitle;
+    const branch = cross ? `<span class="backlink-branch">${escapeHtml(ref.branchTitle)}</span>` : "";
+    return `<button type="button" class="backlink-chip" data-act="open-ref" data-id="${escapeHtml(ref.id)}"><span class="backlink-title">${escapeHtml(ref.title)}</span>${branch}</button>`;
+  }).join("");
+  return `<section class="backlinks"><h2 class="backlinks-label">Referenced by (${list.length})</h2><div class="backlinks-list">${chips}</div></section>`;
+}
+
 function renderPanel() {
+  flushPersonalNote();
   const id = state.selected;
   if (!id || !state.index.byId.has(id)) {
     const root = state.index.byId.get(state.index.rootId);
@@ -2021,7 +2132,7 @@ function renderPanel() {
         <div class="crumbs">${crumbHtml}</div>
         ${panelStudyActions(id)}
       </div>
-      <h1>${escapeHtml(node.title)}${grokBadge}</h1>
+      <h1>${escapeHtml(node.title)}${notePipHtml(id)}${grokBadge}</h1>
       ${jumpBarHtml(jumpItems)}
     </div>
     <div class="panel-body">
@@ -2039,6 +2150,8 @@ function renderPanel() {
     ${keyTermsHtml}
     ${fullNotes}
     ${kidLinks ? `<h2 class="subhead">Subtopics</h2><div class="subtopics">${kidLinks}</div>` : ""}
+    ${personalNoteHtml(id)}
+    ${backlinksHtml(id)}
     </div>`;
 
   const notesBody = $("your-notes-body");
@@ -2437,14 +2550,17 @@ async function importStudyProgressFile(file) {
     return;
   }
   if (!window.confirm("Import this study progress file?")) return;
-  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, and mock history, bookmarks, and recent topics are combined.");
+  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, mock history, bookmarks, and recent topics are combined, and each personal note keeps the newest edit.");
   try {
+    if (replace) discardPersonalNoteDraft();
+    else flushPersonalNote();
     const incoming = await readProgressPayload(text, state.key);
     const merged = mergeProgress(currentProgressBundle(), incoming, { replace });
     writeProgress(localStorage, merged);
     applyImportedPrefs(merged.prefs);
     reloadReviseFromStorage();
     refreshDueBadge();
+    if (state.index) renderPanel();
     toast(replace ? "Study progress replaced from the file." : "Study progress merged from the file.");
   } catch (err) {
     console.error(err);
@@ -2493,6 +2609,7 @@ function onPanelClick(e) {
   if (!btn || !els.panel.contains(btn)) return;
   const act = btn.dataset.act;
   if (act === "open") select(btn.dataset.id, { toggle: true });
+  else if (act === "open-ref") openNode(btn.dataset.id, { push: true });
   else if (act === "open-glossary") openGlossary({ push: true });
   else if (act === "bookmark") toggleBookmark(state.selected);
   else if (act === "revise-branch") {
@@ -2988,6 +3105,11 @@ function wireChrome() {
   els.glossary?.addEventListener("click", onGlossaryClick);
   wirePanelResize();
   els.panel.addEventListener("click", onPanelClick);
+  els.panel.addEventListener("input", onPersonalNoteInput);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushPersonalNote();
+  });
+  window.addEventListener("pagehide", () => flushPersonalNote());
   els.panel.addEventListener("click", onAppLinkClick);
   document.addEventListener("click", (e) => {
     const wrap = els.panel?.querySelector(".panel-more");
@@ -3116,7 +3238,7 @@ function wireChrome() {
       <button type="button" id="export-progress">Export progress</button>
       <button type="button" id="export-progress-plain">Export plain JSON</button>
       <button type="button" id="import-progress">Import progress</button>
-      <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file.</p>`;
+      <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file. Personal notes are included.</p>`;
     els.editsMenu.hidden = !els.editsMenu.hidden;
     $("export-edits").onclick = exportEdits;
     $("import-edits").onclick = openImport;
@@ -3311,6 +3433,7 @@ async function openCompendium(key) {
 }
 
 function lock() {
+  flushPersonalNote();
   clearReviseSession();
   clearGlossarySession();
   state.key = null;
@@ -3326,6 +3449,7 @@ function lock() {
   state.focusId = null;
   state.subjects = [];
   state.nodeBranch = new Map();
+  state.backlinks = new Map();
   state.viewSides = new Map();
   nodeButtons.clear();
   els.nodes.innerHTML = "";
