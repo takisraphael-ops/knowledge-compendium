@@ -1694,3 +1694,180 @@ figure.kc-diagram figcaption {
   figure.kc-diagram .kc-diagram-wide { display: none; }
   figure.kc-diagram svg.kc-diagram-narrow { min-width: 300px; }
 }
+
+
+/* === Search results dropdown === */
+.search-wrap { position: relative; }
+.search-results {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 60;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 4px;
+}
+.sr-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+}
+.sr-item:hover, .sr-item.active {
+  background: rgba(15, 110, 107, 0.1);
+}
+.sr-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.sr-title { font-weight: 650; font-size: 13.5px; }
+.sr-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(15, 110, 107, 0.12);
+  color: var(--teal);
+  font-weight: 600;
+}
+.sr-snip {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sr-more {
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+  text-align: center;
+  border-top: 1px solid var(--line);
+  margin-top: 2px;
+}
+
+/* === Dark mode === */
+:root[data-theme="dark"] {
+  --paper: #14191f;
+  --ink: #e6ebf0;
+  --muted: #9aa6b2;
+  --line: #2a333d;
+  --panel: #1b222a;
+  --teal: #3fb8b2;
+  --ink-soft: #b8c4d4;
+  --danger: #e26d6d;
+  --shadow: 0 2px 6px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+:root[data-theme="dark"] header,
+:root[data-theme="dark"] .nav-line,
+:root[data-theme="dark"] #panel,
+:root[data-theme="dark"] #edits-menu,
+:root[data-theme="dark"] .modal-card,
+:root[data-theme="dark"] #revise,
+:root[data-theme="dark"] #glossary {
+  background: var(--panel);
+  color: var(--ink);
+  border-color: var(--line);
+}
+:root[data-theme="dark"] .field input,
+:root[data-theme="dark"] .field textarea,
+:root[data-theme="dark"] .field select,
+:root[data-theme="dark"] #move-q,
+:root[data-theme="dark"] #import-text,
+:root[data-theme="dark"] .search-wrap,
+:root[data-theme="dark"] .row-actions button,
+:root[data-theme="dark"] .map-controls button,
+:root[data-theme="dark"] #edits-menu button,
+:root[data-theme="dark"] .tool,
+:root[data-theme="dark"] #doc-filter,
+:root[data-theme="dark"] #subject-switch,
+:root[data-theme="dark"] .node,
+:root[data-theme="dark"] .subtopic,
+:root[data-theme="dark"] .rev-card,
+:root[data-theme="dark"] .gloss-card {
+  background: #222b35;
+  border-color: #323e4b;
+  color: var(--ink);
+}
+:root[data-theme="dark"] .search-wrap input { background: transparent; color: var(--ink); }
+:root[data-theme="dark"] .match-nav button:hover,
+:root[data-theme="dark"] .icon-btn:hover,
+:root[data-theme="dark"] .tool:hover { background: #2c3744; }
+:root[data-theme="dark"] code,
+:root[data-theme="dark"] pre {
+  background: #25303b;
+  color: #e6ebf0;
+}
+:root[data-theme="dark"] table th {
+  background: #222b35;
+  color: var(--ink);
+}
+:root[data-theme="dark"] table td,
+:root[data-theme="dark"] table th { border-color: var(--line); }
+:root[data-theme="dark"] .src-block,
+:root[data-theme="dark"] .panel-key-points,
+:root[data-theme="dark"] .key-terms {
+  background: #202832;
+  border-color: var(--line);
+}
+:root[data-theme="dark"] a { color: #5fd1cb; }
+/* Keep SVG diagram plates on a soft light surface so pastel fills and dark labels stay legible */
+:root[data-theme="dark"] figure.kc-diagram {
+  background: #f6f4ee;
+  color: #1c2430;
+  border: 1px solid #323e4b;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+:root[data-theme="dark"] figure.kc-diagram figcaption {
+  color: #3d4a63;
+}
+:root[data-theme="dark"] figure.kc-diagram figcaption a {
+  color: #0f6e6b;
+}
+
+/* === Print / PDF study sheet === */
+@media print {
+  :root, :root[data-theme="dark"] {
+    --paper: #fff;
+    --panel: #fff;
+    --ink: #111;
+    --muted: #444;
+    --line: #ccc;
+    background: #fff;
+    color: #111;
+  }
+  html, body { height: auto !important; overflow: visible !important; }
+  header, #gate, #viewport, .map-controls, #hint, #panel-resizer,
+  #edits-menu, #modal, #toast, .panel-actions, .panel-close,
+  button.edit-btn, .rev-controls { display: none !important; }
+  #app, #stage { display: block !important; height: auto !important; overflow: visible !important; position: static !important; }
+  #panel {
+    position: static !important;
+    width: 100% !important;
+    max-width: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+  }
+  figure.kc-diagram, table, .src-block, .panel-key-points {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

@@ -8,6 +8,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'">
   <title>Knowledge Compendium</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%231f2a2e'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23f3f1ec'/%3E%3Cpath d='M16 16 L28 8 M16 16 L27 20 M16 16 L8 27 M16 16 L6 10' stroke='%237d8c86' stroke-width='1.4' fill='none'/%3E%3C/svg%3E">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -49,12 +50,14 @@
             <button type="button" id="match-prev" aria-label="Previous match">‹</button>
             <button type="button" id="match-next" aria-label="Next match">›</button>
           </div>
+          <div id="search-results" class="search-results" role="listbox" aria-label="Search results" hidden></div>
         </div>
         <div class="tools">
           <select id="doc-filter" aria-label="Filter by source document"></select>
           <button type="button" class="tool" id="glossary-btn">Glossary</button>
           <button type="button" class="tool" id="revise-btn">Revise</button>
           <button type="button" class="tool" id="edits-btn">Edits</button>
+          <button type="button" class="tool" id="theme-btn" aria-label="Toggle dark mode">Dark</button>
           <button type="button" class="tool" id="lock-btn">Lock</button>
         </div>
       </div>

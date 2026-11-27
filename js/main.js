@@ -80,10 +80,12 @@ const els = {
   subjectSwitch: $("subject-switch"),
   count: $("count"),
   search: $("search"),
+  searchResults: $("search-results"),
   matchLabel: $("match-label"),
   docFilter: $("doc-filter"),
   editsBtn: $("edits-btn"),
   editsMenu: $("edits-menu"),
+  themeBtn: $("theme-btn"),
   lockBtn: $("lock-btn"),
   reviseBtn: $("revise-btn"),
   revise: $("revise"),
@@ -1234,6 +1236,7 @@ function runSearch(options = {}) {
   } else {
     draw();
   }
+  renderSearchDropdown();
 }
 
 function markCurrentHit() {
@@ -1244,12 +1247,45 @@ function markCurrentHit() {
   ensureVisible(id);
 }
 
+function hideSearchDropdown() {
+  if (els.searchResults) els.searchResults.hidden = true;
+}
+
+function renderSearchDropdown() {
+  const box = els.searchResults;
+  if (!box) return;
+  const q = state.query.trim();
+  if (q.length < 2 || !state.hits.length) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  const limit = 12;
+  const slice = state.hits.slice(0, limit);
+  const rows = slice.map((id, i) => {
+    const node = state.index.byId.get(id);
+    if (!node) return "";
+    const sub = subjectOfNode(state.index, state.subjects, id);
+    const badge = sub ? `<span class="sr-badge">${escapeHtml(sub.title)}</span>` : "";
+    const sum = (node.summary || "").trim();
+    const snip = sum ? `<span class="sr-snip">${escapeHtml(sum.slice(0, 110))}${sum.length > 110 ? "…" : ""}</span>` : "";
+    const active = i === state.hitCursor ? " active" : "";
+    return `<button type="button" class="sr-item${active}" role="option" aria-selected="${i === state.hitCursor}" data-sr-index="${i}" data-sr-id="${escapeHtml(id)}"><span class="sr-top"><span class="sr-title">${escapeHtml(node.title)}</span>${badge}</span>${snip}</button>`;
+  }).join("");
+  const more = state.hits.length > limit
+    ? `<div class="sr-more">${state.hits.length - limit} more — use ‹ / › to step through all matches</div>`
+    : "";
+  box.innerHTML = rows + more;
+  box.hidden = document.activeElement !== els.search;
+}
+
 function stepHit(dir) {
   if (!state.hits.length) return;
   state.hitCursor = (state.hitCursor + dir + state.hits.length) % state.hits.length;
   const id = state.hits[state.hitCursor];
   select(id, { toggle: false });
   markCurrentHit();
+  renderSearchDropdown();
 }
 
 function fillDocFilter() {
@@ -2210,6 +2246,50 @@ function wireChrome() {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => runSearch(), 140);
   });
+  els.search.addEventListener("focus", () => {
+    if (state.query.trim().length >= 2 && state.hits.length) renderSearchDropdown();
+  });
+  els.search.addEventListener("keydown", (e) => {
+    if (!state.hits.length) return;
+    const maxVisible = Math.min(state.hits.length, 12);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      state.hitCursor = (state.hitCursor + 1) % maxVisible;
+      renderSearchDropdown();
+      els.searchResults.hidden = false;
+      els.searchResults.querySelector(".sr-item.active")?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      state.hitCursor = (state.hitCursor - 1 + maxVisible) % maxVisible;
+      renderSearchDropdown();
+      els.searchResults.hidden = false;
+      els.searchResults.querySelector(".sr-item.active")?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const id = state.hits[state.hitCursor] || state.hits[0];
+      if (id) {
+        openNode(id, { push: true });
+        markCurrentHit();
+      }
+      hideSearchDropdown();
+    } else if (e.key === "Escape" && !els.searchResults.hidden) {
+      e.stopPropagation();
+      hideSearchDropdown();
+    }
+  });
+  els.searchResults?.addEventListener("mousedown", (e) => {
+    const btn = e.target.closest?.(".sr-item");
+    if (!btn) return;
+    e.preventDefault();
+    const idx = Number(btn.dataset.srIndex);
+    const id = btn.dataset.srId;
+    if (!Number.isNaN(idx)) state.hitCursor = idx;
+    if (id) {
+      openNode(id, { push: true });
+      markCurrentHit();
+    }
+    hideSearchDropdown();
+  });
   $("match-prev").addEventListener("click", () => stepHit(-1));
   $("match-next").addEventListener("click", () => stepHit(1));
   els.docFilter.addEventListener("change", () => {
@@ -2253,6 +2333,9 @@ function wireChrome() {
     if (!els.editsMenu.hidden && !e.target.closest("#edits-menu") && e.target !== els.editsBtn) {
       els.editsMenu.hidden = true;
     }
+    if (els.searchResults && !els.searchResults.hidden && !e.target.closest(".search-wrap")) {
+      hideSearchDropdown();
+    }
   });
   els.lockBtn.addEventListener("click", lock);
   document.addEventListener("keydown", (e) => {
@@ -2292,7 +2375,7 @@ async function boot() {
   wireCamera();
   let index;
   try {
-    const res = await fetch(new URL("index.json", DATA_BASE), { cache: "no-store" });
+    const res = await fetch(new URL("index.json", DATA_BASE), { cache: "no-cache" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     index = await res.json();
   } catch (err) {
@@ -2300,7 +2383,7 @@ async function boot() {
     return;
   }
   try {
-    const redirRes = await fetch(new URL("redirects.json", DATA_BASE), { cache: "no-store" });
+    const redirRes = await fetch(new URL("redirects.json", DATA_BASE), { cache: "no-cache" });
     state.redirects = redirRes.ok ? await redirRes.json() : {};
   } catch {
     state.redirects = {};
@@ -2381,16 +2464,21 @@ async function onPassphrase(event) {
 
 async function openCompendium(key) {
   const branches = state.indexFile.branches || [];
-  const nodes = [];
-  for (let i = 0; i < branches.length; i++) {
-    const branch = branches[i];
-    els.gateStatus.textContent = `Decrypting ${i + 1} of ${branches.length}…`;
-    const res = await fetch(new URL(branch.file, DATA_BASE), { cache: "no-store" });
+  let done = 0;
+  els.gateStatus.textContent = `Decrypting 0 of ${branches.length}…`;
+  const results = await Promise.all(branches.map(async (branch) => {
+    const res = await fetch(new URL(branch.file, DATA_BASE), { cache: "no-cache" });
     if (!res.ok) throw new Error(`Missing ${branch.file}`);
     const payload = await res.json();
     const data = await decryptJson(key, payload, branch.id);
     const list = Array.isArray(data) ? data : data.nodes;
     if (!Array.isArray(list)) throw new Error(`${branch.file} has no nodes`);
+    done += 1;
+    els.gateStatus.textContent = `Decrypting ${done} of ${branches.length}…`;
+    return { branch, data, list };
+  }));
+  const nodes = [];
+  for (const { branch, data, list } of results) {
     if (data && !Array.isArray(data) && data.sections && typeof data.sections === "object") {
       Object.assign(state.sections, data.sections);
     }
@@ -2468,3 +2556,38 @@ els.forgetBtn.addEventListener("click", () => {
 });
 
 boot();
+
+const THEME_KEY = "kc-theme-v1";
+function preferredTheme() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === "dark" || saved === "light") return saved;
+  } catch { /* ignore */ }
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+function applyTheme(mode) {
+  const dark = mode === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  if (els.themeBtn) {
+    els.themeBtn.textContent = dark ? "Light" : "Dark";
+    els.themeBtn.setAttribute("aria-pressed", String(dark));
+  }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", dark ? "#14191f" : "#f3f1ec");
+}
+applyTheme(preferredTheme());
+els.themeBtn?.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* ignore */ }
+  applyTheme(next);
+});
+window.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", (e) => {
+  try { if (localStorage.getItem(THEME_KEY)) return; } catch { /* ignore */ }
+  applyTheme(e.matches ? "dark" : "light");
+});
+
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}
