@@ -1,4 +1,4 @@
-const CACHE = "kc-app-v5";
+const CACHE = "kc-app-v6";
 const SHELL = [
   "./",
   "./index.html",
@@ -16,6 +16,7 @@ const SHELL = [
   "./js/revise.js",
   "./js/schedule.js",
   "./js/progress.js",
+  "./js/gist-sync.js",
   "./js/pbq.js",
   "./js/lenses.js",
   "./js/readiness.js",
@@ -42,8 +43,10 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
+  let url;
+  try { url = new URL(req.url); } catch { return; }
+  if (url.origin === "https://api.github.com") return;
   if (req.method !== "GET") return;
-  const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
   event.respondWith(
     fetch(req)
