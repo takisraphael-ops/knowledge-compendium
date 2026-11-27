@@ -28,6 +28,14 @@ export function assignSides(rootId, children) {
   return side;
 }
 
+/** Every top-level child grows to the right, so a subject map reads left to right. */
+export function assignSidesRight(rootId, children) {
+  const kids = children.get(rootId) || [];
+  const side = new Map();
+  for (const id of kids) side.set(id, 1);
+  return side;
+}
+
 /** Split children evenly by card count (not subtree weight). Used on the
  *  overview so eleven subjects do not pile up on the lighter-weight side. */
 export function assignSidesEven(rootId, children) {

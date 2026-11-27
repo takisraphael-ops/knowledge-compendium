@@ -7,7 +7,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { decryptJson, deriveKey, encryptJson, randomBytes } from "../js/crypto.js";
-import { boxesOverlap, layoutMap, assignSides } from "../js/layout.js";
+import { boxesOverlap, layoutMap, assignSides, assignSidesRight } from "../js/layout.js";
 import {
   buildIndex,
   editCount,
@@ -111,6 +111,12 @@ function chain(n, prefix) {
 const big = chain();
 const bigIndex = buildIndex(big.nodes);
 const sides = assignSides(bigIndex.rootId, bigIndex.children);
+const rightKids = bigIndex.children.get(bigIndex.rootId) || [];
+const rightSides = assignSidesRight(bigIndex.rootId, bigIndex.children);
+check(
+  "assignSidesRight",
+  rightKids.length > 0 && rightSides.size === rightKids.length && rightKids.every((id) => rightSides.get(id) === 1)
+);
 const colors = new Map();
 const t0 = performance.now();
 const positions = layoutMap({
