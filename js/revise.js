@@ -17,11 +17,18 @@ import {
   setNewPerDay,
   markIntroduced,
   resetProgress,
-  exportProgress,
-  mergeImport,
   sanitizeScope,
   isDue,
 } from "./schedule.js";
+import {
+  PASS_PCT,
+  appendMockAttempt,
+  historySummary,
+  loadMockHistory,
+  makeAttemptId,
+  saveMockHistory,
+  weakestDomain,
+} from "./progress.js";
 
 const EXAM_VER_KEY = "kc-sy0-version-v1";
 const CARD_MODES = ["flashcards", "practice", "keypoints"];
@@ -37,6 +44,7 @@ let session = null;
 let bound = false;
 let mock = null;
 let mockTimer = 0;
+let historyExpanded = false;
 
 export function initRevise(nextHooks) {
   hooks = nextHooks;
@@ -92,6 +100,33 @@ export function restoreRevise(snap) {
   view = snap.view || view;
   cursor = Number.isFinite(snap.cursor) ? snap.cursor : cursor;
   revealed = !!snap.revealed;
+  render();
+}
+
+export function getReviseStore() {
+  return store || loadStore();
+}
+
+export function currentExamVersion() {
+  return readExamVersion();
+}
+
+export function applyImportedExamVersion(ver) {
+  writeExamVersion(ver === "701" ? "701" : "801");
+}
+
+/** Reload scheduling after a progress import and return to the Revise hub. */
+export function reloadReviseFromStorage() {
+  store = loadStore();
+  if (!hooks || !isReviseVisible()) return;
+  restoreScope();
+  stopMockTimer();
+  mock = null;
+  view = "hub";
+  queue = [];
+  session = null;
+  revealed = false;
+  cursor = 0;
   render();
 }
 
@@ -370,15 +405,15 @@ function renderHub() {
 
       ${renderProgressBlocks(st, cards, stats)}
 
-      <section class="rev-card-block">
-        <h2>Progress on this device</h2>
-        <p class="rev-fine">Scheduling data stays in this browser. Card wording is never written here — only card ids and review dates.</p>
-        <div class="rev-data-row">
+      <section class="rev-card-block" id="rev-progress-sync">
+        <h2>Progress sync</h2>
+        <p class="rev-fine">Move scheduling, mock history, bookmarks, recent topics, and display preferences between devices. Note text is not included. Export is encrypted with this compendium’s passphrase unless you choose plain JSON.</p>
+        <div class="rev-data-row rev-sync-row">
           <button type="button" class="tool" data-act="export">Export progress</button>
+          <button type="button" class="tool" data-act="export-plain">Plain JSON</button>
           <button type="button" class="tool" data-act="import">Import progress</button>
-          <button type="button" class="tool danger" data-act="reset">Reset progress</button>
+          <button type="button" class="tool danger" data-act="reset">Reset scheduling</button>
         </div>
-        <input id="rev-import-file" type="file" accept="application/json,.json" hidden>
       </section>
     </div>
   </div>`;
@@ -604,9 +639,21 @@ function onClick(e) {
   } else if (act === "open-topic") {
     hooks.openNode?.(btn.dataset.id, { push: true });
   } else if (act === "export") {
-    doExport();
+    hooks.exportStudyProgress?.({ plain: false });
+  } else if (act === "export-plain") {
+    hooks.exportStudyProgress?.({ plain: true });
   } else if (act === "import") {
-    hooks.els.revise.querySelector("#rev-import-file")?.click();
+    hooks.promptImportProgress?.();
+  } else if (act === "drill") {
+    startDrill(btn.dataset.domain, btn.dataset.exam);
+  } else if (act === "clear-history") {
+    clearMockHistory();
+  } else if (act === "history-more") {
+    historyExpanded = true;
+    render();
+  } else if (act === "history-less") {
+    historyExpanded = false;
+    render();
   } else if (act === "reset") {
     doReset();
   } else if (act === "mock-start") {
@@ -675,10 +722,6 @@ function onChange(e) {
     scope.mode = t.value === "practice" || t.value === "keypoints" ? t.value : "flashcards";
     persistScope();
     render();
-  } else if (t.id === "rev-import-file") {
-    const file = t.files?.[0];
-    t.value = "";
-    if (file) doImport(file);
   }
 }
 
@@ -773,35 +816,6 @@ function onKey(e) {
   else if (e.key === "2") { e.preventDefault(); applyGrade("hard"); }
   else if (e.key === "3") { e.preventDefault(); applyGrade("good"); }
   else if (e.key === "4") { e.preventDefault(); applyGrade("easy"); }
-}
-
-function doExport() {
-  const json = exportProgress(store);
-  const blob = new Blob([json], { type: "application/json" });
-  const a = document.createElement("a");
-  const day = new Date().toISOString().slice(0, 10);
-  a.href = URL.createObjectURL(blob);
-  a.download = `kc-revise-progress-${day}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  hooks.toast?.("Progress file downloaded. It contains ids and review dates only, not the card text.");
-}
-
-async function doImport(file) {
-  try {
-    const text = await file.text();
-    const replace = window.confirm("Replace your current revision progress with this file? Click Cancel to merge the file into what is already on this device.");
-    store = mergeImport(store, text, { replace });
-    saveStore(store);
-    restoreScope();
-    view = "hub";
-    render();
-    hooks.toast?.(replace ? "Progress replaced from the file." : "Progress merged from the file.");
-  } catch (err) {
-    hooks.toast?.("That file could not be imported. Use a progress export from this app.");
-  }
 }
 
 function doReset() {
@@ -913,7 +927,8 @@ function renderMockLauncher(showDomains) {
     <h2>Security+ Mock Exam</h2>
     ${versionLine}
     <div class="rev-mock-lengths">${buttons}</div>
-    <p class="rev-fine">A mock stays in this session. It does not change your spaced-repetition schedule. Passing line used here: 83% (750 out of 900).</p>
+    <p class="rev-fine">A mock stays in this session. It does not change your spaced-repetition schedule. Passing line used here: ${PASS_PCT}% (750 out of 900). Finished attempts are saved on this device.</p>
+    ${renderMockHistory(ver)}
   </section>`;
 }
 
@@ -995,6 +1010,10 @@ function startMock(lengthId) {
     items: ordered,
     cursor: 0,
     endedBecause: null,
+    historyId: makeAttemptId(),
+    startedAt: Date.now(),
+    finishedAt: 0,
+    saved: false,
   };
   view = "mock";
   render();
@@ -1107,7 +1126,9 @@ function mockScore() {
 
 function renderMockSummary() {
   if (!mock) return renderHub();
+  ensureMockSaved();
   const score = mockScore();
+  const weak = weakestDomain(mockDomainStats());
   const verdict = score.total
     ? (score.passed
       ? `${score.pct}% is at or above the 83% line (750 out of 900).`
@@ -1161,8 +1182,10 @@ function renderMockSummary() {
         </div>
         <div class="rev-start-row">
           <button type="button" class="solid" data-act="to-hub">Back to options</button>
+          ${weak ? `<button type="button" class="solid" data-act="drill" data-domain="${escapeHtml(weak.id)}" data-exam="${mock.version === "701" ? "701" : "801"}">Drill weakest domain</button>` : ""}
           <button type="button" class="tool" data-act="mock-review" ${reviewN ? "" : "disabled"}>Review missed${reviewN ? ` (${reviewN})` : ""}</button>
         </div>
+        ${weak ? `<p class="rev-fine">Lowest domain on this mock: ${escapeHtml(weak.label)} (${weak.pct}%).</p>` : ""}
       </section>
     </div>
   </div>`;
@@ -1236,9 +1259,169 @@ function finishMock(reason) {
   if (!mock || view === "mock-summary" || view === "mock-review") return;
   stopMockTimer();
   mock.endedBecause = reason === "time" ? "time" : "user";
+  if (!mock.finishedAt) mock.finishedAt = Date.now();
   view = "mock-summary";
   render();
   if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function mockDomainStats() {
+  return (mock?.alloc || []).map((row) => {
+    const group = (mock.items || []).filter((item) => item.domainId === row.id);
+    const correct = group.filter((item) => item.grade === "got").length;
+    const total = group.length;
+    return {
+      id: row.id,
+      label: row.label,
+      correct,
+      total,
+      pct: total ? Math.round((100 * correct) / total) : 0,
+    };
+  }).filter((row) => row.total > 0);
+}
+
+function ensureMockSaved() {
+  if (!mock || mock.saved) return;
+  if (!mock.finishedAt) mock.finishedAt = Date.now();
+  const score = mockScore();
+  const attempt = {
+    id: mock.historyId || makeAttemptId(),
+    date: new Date(mock.finishedAt).toISOString(),
+    examVersion: mock.version === "701" ? "701" : "801",
+    length: mock.requested || score.total,
+    total: score.total,
+    correct: score.got,
+    pct: score.pct,
+    passed: score.pct >= PASS_PCT,
+    durationSec: Math.max(0, Math.round((mock.finishedAt - (mock.startedAt || mock.finishedAt)) / 1000)),
+    domains: mockDomainStats(),
+  };
+  if (!attempt.total) {
+    mock.saved = true;
+    return;
+  }
+  try {
+    saveMockHistory(appendMockAttempt(loadMockHistory(), attempt));
+  } catch {
+    return;
+  }
+  mock.saved = true;
+  hooks.onStudyDataChanged?.();
+}
+
+function renderMockHistory(ver) {
+  const summary = historySummary(loadMockHistory(), ver);
+  if (!summary) return "";
+  const code = (SY0_VERSIONS[ver] || SY0_VERSIONS["801"]).code;
+  const shown = historyExpanded ? summary.attempts : summary.attempts.slice(0, 6);
+  const more = summary.attempts.length - shown.length;
+  const weakestNote = summary.weakest
+    ? `<p class="rev-fine">Weakest domain across these ${escapeHtml(code)} attempts: ${escapeHtml(summary.weakest.label)} (${summary.weakest.pct}%).</p>`
+    : "";
+  const trend = [...summary.attempts].reverse().slice(-8).map((attempt) => {
+    const cls = attempt.passed ? "mock-pass" : "mock-fail";
+    return `<span class="mock-trend-score ${cls}">${attempt.pct}%</span>`;
+  }).join("");
+  return `<div class="mock-history">
+    <h3 class="rev-sub">Mock history</h3>
+    <dl class="rev-stats mock-stats">
+      <div><dt>Latest</dt><dd>${summary.latest.pct}%</dd></div>
+      <div><dt>Best</dt><dd>${summary.best.pct}%</dd></div>
+      <div><dt>Average</dt><dd>${summary.average}%</dd></div>
+      <div><dt>Attempts</dt><dd>${summary.count}</dd></div>
+    </dl>
+    <p class="mock-trend" aria-label="Recent scores, oldest to newest">${trend}</p>
+    ${weakestNote}
+    <div class="rev-data-row">
+      ${summary.weakest ? `<button type="button" class="solid" data-act="drill" data-domain="${escapeHtml(summary.weakest.id)}" data-exam="${ver}">Drill weakest domain</button>` : ""}
+      ${more > 0 ? `<button type="button" class="tool" data-act="history-more">Show all ${summary.count}</button>` : ""}
+      ${historyExpanded && summary.attempts.length > 6 ? `<button type="button" class="tool" data-act="history-less">Show recent</button>` : ""}
+      <button type="button" class="tool danger" data-act="clear-history">Clear history</button>
+    </div>
+    <div class="mock-attempts">${shown.map(renderMockAttempt).join("")}</div>
+  </div>`;
+}
+
+function renderMockAttempt(attempt) {
+  const code = (SY0_VERSIONS[attempt.examVersion] || SY0_VERSIONS["801"]).code;
+  const mark = attempt.passed
+    ? `<span class="mock-pill mock-pass">Pass</span>`
+    : `<span class="mock-pill mock-fail">Below pass</span>`;
+  const domains = (attempt.domains || []).map((d) => `<li><span>${escapeHtml(d.label)}</span><span>${d.correct}/${d.total} (${d.pct}%)</span></li>`).join("");
+  return `<details class="mock-attempt">
+    <summary>
+      <span class="mock-when">${escapeHtml(formatWhen(attempt.date))}</span>
+      <span class="mock-badge">${escapeHtml(code)}</span>
+      <span class="mock-score">${attempt.correct}/${attempt.total} (${attempt.pct}%)</span>
+      ${mark}
+    </summary>
+    <p class="rev-fine">${formatDuration(attempt.durationSec)} · ${attempt.length} requested</p>
+    ${domains ? `<ul class="mock-domains">${domains}</ul>` : ""}
+  </details>`;
+}
+
+function formatWhen(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso || "");
+  try {
+    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return d.toISOString().slice(0, 16).replace("T", " ");
+  }
+}
+
+function formatDuration(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m <= 0) return `${r}s`;
+  return `${m}m ${String(r).padStart(2, "0")}s`;
+}
+
+function startDrill(domainId, examVersion) {
+  const id = String(domainId || "");
+  if (!id) return;
+  if (view === "mock") {
+    if (!confirmLeaveMock()) return;
+  }
+  stopMockTimer();
+  mock = null;
+  if (examVersion) writeExamVersion(examVersion);
+  const cyber = cyberSubject();
+  scope.mode = "practice";
+  scope.sectionIds = [];
+  scope.domainIds = [id];
+  if (cyber) scope.branchIds = [cyber.rootId];
+  persistScope();
+  store = loadStore();
+  const { cards } = currentCatalog();
+  let next = buildQueue(store, cards);
+  if (!next.length) next = shuffleCopy(cards).slice(0, 20);
+  if (!next.length) {
+    view = "hub";
+    hooks.toast?.("No practice questions in that domain yet.");
+    render();
+    return;
+  }
+  queue = next;
+  cursor = 0;
+  revealed = false;
+  session = { done: [], startedAt: Date.now(), drill: true };
+  view = "study";
+  markCurrentIntroduced();
+  render();
+  if (hooks.els.revise) hooks.els.revise.scrollTop = 0;
+}
+
+function clearMockHistory() {
+  const ok = window.confirm("Clear all mock exam history on this device? This cannot be undone.");
+  if (!ok) return;
+  saveMockHistory([]);
+  historyExpanded = false;
+  hooks.onStudyDataChanged?.();
+  if (view !== "hub") view = "hub";
+  render();
+  hooks.toast?.("Mock exam history cleared.");
 }
 
 function confirmLeaveMock() {

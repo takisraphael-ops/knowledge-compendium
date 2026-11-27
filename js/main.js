@@ -36,8 +36,18 @@ import {
   wouldCycle,
 } from "./model.js";
 import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
-import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise } from "./revise.js";
+import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise, getReviseStore, reloadReviseFromStorage, applyImportedExamVersion, currentExamVersion } from "./revise.js";
 import { collectTermsForNode, keyPointsOf, parsePracticePairs } from "./cards.js";
+import {
+  collectProgress,
+  encryptProgress,
+  isEncryptedEnvelope,
+  loadMockHistory,
+  mergeProgress,
+  pushRecent,
+  readProgressPayload,
+  writeProgress,
+} from "./progress.js";
 import { buildAbbrIndex, setAbbrIndex, wrapPanelAbbrs, bindAbbrTooltips, setGlossaryOpener } from "./abbr.js";
 import { buildGlossary, initGlossary, showGlossary, hideGlossary, isGlossaryVisible, clearGlossarySession, glossaryHash, getGlossaryEntry, glossarySlug } from "./glossary.js";
 
@@ -109,6 +119,7 @@ const els = {
   themeBtn: $("theme-btn"),
   lockBtn: $("lock-btn"),
   reviseBtn: $("revise-btn"),
+  progressFile: $("progress-import-file"),
   revise: $("revise"),
   glossaryBtn: $("glossary-btn"),
   glossary: $("glossary"),
@@ -1317,7 +1328,8 @@ function readStoredIds(key) {
     if (!Array.isArray(raw)) return [];
     const out = [];
     const seen = new Set();
-    for (const id of raw) {
+    for (const item of raw) {
+      const id = typeof item === "string" ? item : item?.id;
       if (typeof id !== "string" || !id || id.length > 120 || seen.has(id)) continue;
       seen.add(id);
       out.push(id);
@@ -1339,8 +1351,7 @@ function liveStoredIds(key, limit) {
 
 function rememberRecent(id) {
   if (!id || !state.index?.byId.has(id) || id === state.index.rootId) return;
-  const next = [id, ...readStoredIds(RECENT_KEY).filter((x) => x !== id)].slice(0, 5);
-  writeStoredIds(RECENT_KEY, next);
+  try { pushRecent(localStorage, id); } catch { /* ignore */ }
 }
 
 function noteOpenedTopic(id) {
@@ -1418,6 +1429,16 @@ function continueStripHtml() {
   </section>`;
 }
 
+function mockStatusHtml() {
+  let history = [];
+  try { history = loadMockHistory(localStorage); } catch { return ""; }
+  const latest = history[0];
+  if (!latest) return "";
+  const code = latest.examVersion === "701" ? "SY0-701" : "SY0-801";
+  const mark = latest.passed ? "Pass" : "Below pass";
+  return `<p class="ov-mock-status"><span>Latest mock</span> ${escapeHtml(code)} · ${latest.correct}/${latest.total} (${latest.pct}%) · ${escapeHtml(mark)}</p>`;
+}
+
 function renderOverview() {
   const grid = els.overviewGrid;
   if (!grid || !state.index) return;
@@ -1468,6 +1489,7 @@ function renderOverview() {
       </div>
     </div>
     ${continueStripHtml()}
+    ${mockStatusHtml()}
     <div class="ov-cards">${cards}</div>
   </div>`;
   if (grid.dataset.key === html) return;
@@ -2338,6 +2360,104 @@ function toast(message) {
   }, 3400);
 }
 
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+}
+
+function currentProgressBundle() {
+  const theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  return collectProgress(localStorage, { srs: getReviseStore(), theme, examVersion: currentExamVersion() });
+}
+
+async function exportStudyProgress({ plain = false } = {}) {
+  const bundle = currentProgressBundle();
+  const day = new Date().toISOString().slice(0, 10);
+  els.editsMenu.hidden = true;
+  if (!plain) {
+    if (!state.key) {
+      toast("Unlock the compendium before exporting encrypted progress.");
+      return;
+    }
+    try {
+      const envelope = await encryptProgress(state.key, bundle);
+      downloadText(`kc-progress-${day}.kc-progress.enc.json`, JSON.stringify(envelope, null, 2));
+      toast("Encrypted progress downloaded. It opens with this compendium’s passphrase.");
+    } catch (err) {
+      console.error(err);
+      toast("Could not encrypt the progress file.");
+    }
+    return;
+  }
+  downloadText(`kc-progress-${day}.json`, JSON.stringify(bundle, null, 2));
+  toast("Plain progress JSON downloaded. Anyone with the file can read it.");
+}
+
+function promptImportProgress() {
+  els.editsMenu.hidden = true;
+  els.progressFile?.click();
+}
+
+function applyImportedPrefs(prefs) {
+  if (!prefs) return;
+  if (prefs.theme === "dark" || prefs.theme === "light") applyTheme(prefs.theme);
+  if (prefs.viewMode === "map" || prefs.viewMode === "outline") state.viewMode = prefs.viewMode;
+  if (typeof prefs.autoFold === "boolean") state.autoFold = prefs.autoFold;
+  if (prefs.examVersion === "701" || prefs.examVersion === "801") applyImportedExamVersion(prefs.examVersion);
+  syncAutoFoldButtons();
+  updateViewSwitch();
+  if (!state.index || state.mode === "revise" || state.mode === "glossary") return;
+  syncSurface();
+}
+
+async function importStudyProgressFile(file) {
+  if (!file) return;
+  let text;
+  try {
+    text = await file.text();
+  } catch {
+    toast("That file could not be read.");
+    return;
+  }
+  let preview;
+  try {
+    preview = JSON.parse(text);
+  } catch {
+    toast("That file could not be imported. It is not valid JSON.");
+    return;
+  }
+  if (isEncryptedEnvelope(preview) && !state.key) {
+    toast("Unlock the compendium before importing an encrypted progress file.");
+    return;
+  }
+  if (!window.confirm("Import this study progress file?")) return;
+  const replace = window.confirm("Replace study progress on this device with this file?\n\nOK replaces it. Cancel merges it: the more-reviewed card is kept, and mock history, bookmarks, and recent topics are combined.");
+  try {
+    const incoming = await readProgressPayload(text, state.key);
+    const merged = mergeProgress(currentProgressBundle(), incoming, { replace });
+    writeProgress(localStorage, merged);
+    applyImportedPrefs(merged.prefs);
+    reloadReviseFromStorage();
+    refreshDueBadge();
+    toast(replace ? "Study progress replaced from the file." : "Study progress merged from the file.");
+  } catch (err) {
+    console.error(err);
+    if (err?.code === "decrypt") {
+      toast("Could not decrypt that progress file. It needs the same passphrase that unlocked this compendium.");
+    } else if (err?.code === "locked") {
+      toast("Unlock the compendium before importing an encrypted progress file.");
+    } else {
+      toast("That file could not be imported. It is not a valid progress file.");
+    }
+  }
+}
+
 function onGlossaryClick(e) {
   const back = e.target.closest("[data-act=glossary-back]");
   if (back) {
@@ -2841,7 +2961,10 @@ function wireChrome() {
     openNode,
     leaveRevise,
     toast,
+    exportStudyProgress,
+    promptImportProgress,
     onDueChange: () => refreshDueBadge({ redrawOverview: false }),
+    onStudyDataChanged: () => refreshDueBadge(),
   });
   initGlossary({
     els: { glossary: els.glossary, glossaryBtn: els.glossaryBtn },
@@ -2987,11 +3110,25 @@ function wireChrome() {
       <button type="button" id="export-edits">Export edits</button>
       <button type="button" id="import-edits">Import edits</button>
       <button type="button" id="discard-edits" ${n || state.editsUnreadable ? "" : "disabled"}>Discard edits</button>
-      <p class="muted">Export writes plaintext JSON so you can merge it into the master notes. It is not encrypted.</p>`;
+      <p class="muted">Export writes plaintext JSON so you can merge it into the master notes. It is not encrypted.</p>
+      <hr class="menu-rule">
+      <p class="menu-label">Study progress</p>
+      <button type="button" id="export-progress">Export progress</button>
+      <button type="button" id="export-progress-plain">Export plain JSON</button>
+      <button type="button" id="import-progress">Import progress</button>
+      <p class="muted">Encrypted export uses this unlock. Plain JSON is readable by anyone with the file.</p>`;
     els.editsMenu.hidden = !els.editsMenu.hidden;
     $("export-edits").onclick = exportEdits;
     $("import-edits").onclick = openImport;
     $("discard-edits").onclick = discardEdits;
+    $("export-progress").onclick = () => exportStudyProgress({ plain: false });
+    $("export-progress-plain").onclick = () => exportStudyProgress({ plain: true });
+    $("import-progress").onclick = () => promptImportProgress();
+  });
+  els.progressFile?.addEventListener("change", () => {
+    const file = els.progressFile.files?.[0];
+    els.progressFile.value = "";
+    if (file) importStudyProgressFile(file);
   });
   document.addEventListener("click", (e) => {
     if (!els.editsMenu.hidden && !e.target.closest("#edits-menu") && e.target !== els.editsBtn) {

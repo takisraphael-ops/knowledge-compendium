@@ -7,6 +7,23 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { decryptJson, deriveKey, encryptJson, randomBytes } from "../js/crypto.js";
+import {
+  BOOKMARKS_KEY,
+  MOCK_HISTORY_KEY,
+  PASS_PCT,
+  appendMockAttempt,
+  buildProgressBundle,
+  collectProgress,
+  encryptProgress,
+  mergeHistory,
+  mergeProgress,
+  pickMockQuestions,
+  preferSrsCard,
+  readProgressPayload,
+  weakestDomain,
+  weakestDomainFromHistory,
+  writeProgress,
+} from "../js/progress.js";
 import { boxesOverlap, layoutMap, assignSides, assignSidesRight } from "../js/layout.js";
 import {
   buildIndex,
@@ -303,6 +320,228 @@ try {
 } catch {
   console.log("skip private corpus (private/ not present)");
 }
+
+function srsCard(over = {}) {
+  return {
+    ease: 2.5,
+    interval: 1,
+    reps: 1,
+    lapses: 0,
+    due: 10,
+    last: 1000,
+    lastGrade: "good",
+    introducedOn: "2026-01-01",
+    ...over,
+  };
+}
+
+function memoryStorage() {
+  const m = new Map();
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k),
+  };
+}
+
+function mockAttempt(over = {}) {
+  const correct = over.correct ?? 8;
+  const total = over.total ?? 10;
+  return {
+    id: over.id || "m-1",
+    date: over.date || "2026-11-01T00:00:00.000Z",
+    examVersion: over.examVersion || "801",
+    length: over.length || total,
+    total,
+    correct,
+    pct: Math.round((100 * correct) / total),
+    passed: Math.round((100 * correct) / total) >= PASS_PCT,
+    durationSec: over.durationSec ?? 90,
+    domains: over.domains || [
+      { id: "sy0-d1", label: "Concepts", correct: 4, total: 5, pct: 80 },
+      { id: "sy0-d2", label: "Threats", correct: 1, total: 5, pct: 20 },
+    ],
+  };
+}
+
+const kept = preferSrsCard(
+  srsCard({ reps: 2, lapses: 1, last: 9000 }),
+  srsCard({ reps: 1, lapses: 0, last: 1000 })
+);
+check("srs keeps more-reviewed card", kept.reps === 2 && kept.last === 9000);
+const newer = preferSrsCard(
+  srsCard({ reps: 2, lapses: 1, last: 1000 }),
+  srsCard({ reps: 3, lapses: 0, last: 4000, ease: 2.8 })
+);
+check("srs tie on reviews uses newer last", newer.last === 4000 && newer.ease === 2.8);
+
+const localBundle = buildProgressBundle({
+  exportedAt: "2026-11-01T00:00:00.000Z",
+  srs: {
+    settings: { newPerDay: 20, scope: { branchIds: ["cyber"], sectionIds: [], domainIds: [], mode: "flashcards", examVersion: "801" } },
+    cards: {
+      "t:c1:alpha": srsCard({ reps: 1, lapses: 0, last: 5000 }),
+      "t:c2:local": srsCard({ reps: 3, lapses: 0, last: 3000 }),
+    },
+  },
+  mockHistory: [mockAttempt({ id: "old-mock", date: "2026-10-01T00:00:00.000Z" })],
+  bookmarks: ["c1"],
+  recent: [{ id: "c1", at: 10 }, { id: "c3", at: 4 }],
+  prefs: { theme: "light", viewMode: "map", autoFold: true, examVersion: "801" },
+});
+const incomingBundle = buildProgressBundle({
+  exportedAt: "2026-11-20T00:00:00.000Z",
+  srs: {
+    settings: { newPerDay: 5, scope: { branchIds: [], sectionIds: [], domainIds: [], mode: "practice", examVersion: "701" } },
+    cards: {
+      "t:c1:alpha": srsCard({ reps: 4, lapses: 1, last: 1000, ease: 2.8 }),
+      "q:c90:1": srsCard({ reps: 2, lapses: 0, last: 2000 }),
+    },
+  },
+  mockHistory: [
+    mockAttempt({ id: "old-mock", date: "2026-10-02T00:00:00.000Z", correct: 9 }),
+    mockAttempt({ id: "new-mock", date: "2026-11-20T00:00:00.000Z", correct: 9, examVersion: "701" }),
+  ],
+  bookmarks: ["c2", "c1"],
+  recent: [{ id: "c2", at: 50 }, { id: "c1", at: 5 }],
+  prefs: { theme: "dark", viewMode: "outline", autoFold: false, examVersion: "701" },
+});
+const mergedProgress = mergeProgress(localBundle, incomingBundle, { replace: false });
+check(
+  "merge keeps more-reviewed alpha card",
+  mergedProgress.srs.cards["t:c1:alpha"].reps === 4 && mergedProgress.srs.cards["t:c1:alpha"].lapses === 1
+);
+check("merge keeps local-only card and incoming card", mergedProgress.srs.cards["t:c2:local"].reps === 3 && mergedProgress.srs.cards["q:c90:1"].reps === 2);
+check("merge keeps local new-card cap", mergedProgress.srs.settings.newPerDay === 20);
+check("merge unions bookmarks in existing order", mergedProgress.bookmarks.join() === "c1,c2");
+check("merge recent is newest first", mergedProgress.recent.map((item) => item.id).join() === "c2,c1,c3");
+check("merge dedupes mock history by id", mergedProgress.mockHistory.filter((item) => item.id === "old-mock").length === 1);
+check("merge keeps the newer copy of a shared attempt", mergedProgress.mockHistory.find((item) => item.id === "old-mock").correct === 9);
+check("merge applies incoming prefs", mergedProgress.prefs.theme === "dark" && mergedProgress.prefs.viewMode === "outline" && mergedProgress.prefs.autoFold === false && mergedProgress.prefs.examVersion === "701");
+check("merge writes exam version onto the srs scope", mergedProgress.srs.settings.scope.examVersion === "701" && mergedProgress.srs.settings.scope.branchIds.includes("cyber"));
+
+const replaced = mergeProgress(localBundle, incomingBundle, { replace: true });
+check("replace drops local-only card", !replaced.srs.cards["t:c2:local"] && replaced.srs.cards["q:c90:1"]);
+check("replace takes incoming daily cap", replaced.srs.settings.newPerDay === 5);
+check("replace uses incoming bookmarks", replaced.bookmarks.join() === "c2,c1");
+
+const sameStamp = mergeHistory(
+  [mockAttempt({ id: "one", date: "2026-11-20T12:00:00.000Z" })],
+  [mockAttempt({ id: "two", date: "2026-11-20T12:00:00.000Z", correct: 9 })]
+);
+check("mock history dedupes identical timestamps", sameStamp.length === 1 && sameStamp[0].id === "two");
+
+const cappedCurrent = [];
+const cappedIncoming = [];
+for (let i = 0; i < 40; i++) cappedCurrent.push(mockAttempt({ id: `a-${i}`, date: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString() }));
+for (let i = 0; i < 30; i++) cappedIncoming.push(mockAttempt({ id: `b-${i}`, date: new Date(Date.UTC(2026, 1, 1, 0, i)).toISOString() }));
+const historyCapped = mergeHistory(cappedCurrent, cappedIncoming);
+check("mock history caps at 50 newest", historyCapped.length === 50 && historyCapped[0].id === "b-29" && !historyCapped.some((item) => item.id === "a-0"));
+
+const legacy = {
+  v: 1,
+  exportedAt: "2026-01-01T00:00:00.000Z",
+  settings: { newPerDay: 10 },
+  cards: { "t:c9:zeta": srsCard({ reps: 8, lapses: 0, last: 9 }) },
+};
+const legacyMerged = mergeProgress(localBundle, legacy, { replace: false });
+check("legacy srs import merges cards and keeps bookmarks", legacyMerged.srs.cards["t:c9:zeta"].reps === 8 && legacyMerged.bookmarks.includes("c1") && legacyMerged.mockHistory.length === 1);
+
+const history = [
+  mockAttempt({
+    id: "a",
+    date: "2026-11-01T00:00:00.000Z",
+    examVersion: "801",
+    correct: 6,
+    domains: [
+      { id: "sy0-d1", label: "Concepts", correct: 5, total: 5, pct: 100 },
+      { id: "sy0-d2", label: "Threats", correct: 1, total: 5, pct: 20 },
+    ],
+  }),
+  mockAttempt({
+    id: "b",
+    date: "2026-11-02T00:00:00.000Z",
+    examVersion: "801",
+    correct: 6,
+    domains: [
+      { id: "sy0-d1", label: "Concepts", correct: 2, total: 5, pct: 40 },
+      { id: "sy0-d2", label: "Threats", correct: 4, total: 5, pct: 80 },
+    ],
+  }),
+  mockAttempt({
+    id: "c",
+    date: "2026-11-03T00:00:00.000Z",
+    examVersion: "701",
+    correct: 0,
+    total: 5,
+    domains: [{ id: "sy0-d4", label: "Ops", correct: 0, total: 5, pct: 0 }],
+  }),
+];
+check("weakest domain across 801 attempts", weakestDomainFromHistory(history, "801").id === "sy0-d2");
+check("weakest domain respects exam version", weakestDomainFromHistory(history, "701").id === "sy0-d4");
+check(
+  "weakest domain tie prefers more questions then smaller id",
+  weakestDomain([
+    { id: "sy0-d5", label: "Prog", correct: 1, total: 2, pct: 50 },
+    { id: "sy0-d1", label: "Concepts", correct: 2, total: 4, pct: 50 },
+  ]).id === "sy0-d1" &&
+  weakestDomain([
+    { id: "sy0-d5", label: "Prog", correct: 1, total: 4, pct: 25 },
+    { id: "sy0-d3", label: "Arch", correct: 1, total: 4, pct: 25 },
+  ]).id === "sy0-d3"
+);
+const once = appendMockAttempt([], mockAttempt({ id: "once", date: "2026-11-04T00:00:00.000Z" }));
+const twice = appendMockAttempt(once, mockAttempt({ id: "once", date: "2026-11-04T00:00:00.000Z" }));
+check("append does not duplicate an attempt", twice.length === 1);
+
+const pools = [];
+for (const domain of domainsForVersion("801")) {
+  for (let i = 0; i < 30; i++) pools.push({ id: `q:${domain.id}:${i}`, domainId: domain.id });
+}
+const drawn = pickMockQuestions(pools, domainsForVersion("801"), 10, () => 0);
+check("mock draw follows the requested length", drawn.length === 10);
+
+const mem = memoryStorage();
+writeProgress(mem, localBundle);
+check("progress keys", mem.getItem(BOOKMARKS_KEY).includes("c1") && mem.getItem(MOCK_HISTORY_KEY).includes("old-mock"));
+const collected = collectProgress(mem);
+check("storage round trip", collected.bookmarks.includes("c1") && collected.mockHistory.length === 1 && collected.srs.cards["t:c2:local"].reps === 3);
+
+const progressKey = await deriveKey("progress passphrase", randomBytes(16), 1000, true);
+const secretBundle = buildProgressBundle({
+  exportedAt: "2026-11-27T00:00:00.000Z",
+  srs: { cards: { "t:node:secret-token-zxq": srsCard({ reps: 6, lapses: 1, last: 42 }) } },
+  mockHistory: [mockAttempt({ id: "enc-1", date: "2026-11-27T00:00:00.000Z" })],
+  bookmarks: ["secret-token-zxq"],
+  recent: [{ id: "secret-token-zxq", at: 7 }],
+  prefs: { theme: "dark", viewMode: "map", autoFold: true, examVersion: "801" },
+});
+const envelope = await encryptProgress(progressKey, secretBundle);
+const envelopeText = JSON.stringify(envelope);
+check("encrypted export is an envelope", envelope.alg === "AES-GCM" && !envelopeText.includes("secret-token-zxq"));
+const decrypted = await readProgressPayload(envelopeText, progressKey);
+check(
+  "encrypted round trip",
+  decrypted.srs.cards["t:node:secret-token-zxq"].reps === 6 &&
+  decrypted.bookmarks.includes("secret-token-zxq") &&
+  decrypted.mockHistory[0].id === "enc-1"
+);
+const plainRead = await readProgressPayload(JSON.stringify(secretBundle), null);
+check("plain json import", plainRead.srs.cards["t:node:secret-token-zxq"].reps === 6 && plainRead.prefs.theme === "dark");
+let badPass = "";
+try {
+  const otherKey = await deriveKey("wrong passphrase", randomBytes(16), 1000, true);
+  await readProgressPayload(envelopeText, otherKey);
+} catch (err) {
+  badPass = err.code;
+}
+check("wrong passphrase rejected", badPass === "decrypt");
+let badJson = "";
+try { await readProgressPayload("{", null); } catch (err) { badJson = err.code; }
+check("malformed progress rejected", badJson === "malformed");
+let notProgress = "";
+try { await readProgressPayload(JSON.stringify({ hello: 1 }), null); } catch (err) { notProgress = err.code; }
+check("unrecognised json rejected", notProgress === "malformed");
 
 if (failed) {
   console.error(`${failed} failed`);
