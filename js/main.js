@@ -34,7 +34,7 @@ import {
   subtreeIds,
   wouldCycle,
 } from "./model.js";
-import { escapeHtml, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
+import { escapeHtml, initDiagramZoom, renderDepth, renderFullNotes, renderYourNotes, renderKeyTerms, renderKeyPoints, renderStudyLayers, renderLead, hasOriginalToggle, setTermLinker, YOUR_NOTES_LABEL, SHOW_ORIGINAL, SHOW_TIDIED, FULL_NOTES_LABEL } from "./notes.js";
 import { buildBacklinkIndex } from "./backlinks.js";
 import { initRevise, showRevise, hideRevise, isReviseVisible, clearReviseSession, getReviseSnapshot, restoreRevise, openReviseForScope, getDueCount, prepareToLeaveRevise, getReviseStore, reloadReviseFromStorage, adoptExternalProgress, applyImportedExamVersion, currentExamVersion } from "./revise.js";
 import { collectTermsForNode, keyPointsCardId, keyPointsOf, parsePracticePairs, practiceCardId, termCardId } from "./cards.js";
@@ -1921,6 +1921,7 @@ function applyAbbrs() {
   const node = state.index?.byId.get(state.selected);
   const subject = node ? subjectOfNode(state.index, state.subjects, node.id) : subjectBySlug(state.slug);
   const branch = subject?.branchId || subject?.slug || state.nodeBranch?.get(state.selected) || "";
+  if (els.panel) initDiagramZoom(els.panel);
   wrapPanelAbbrs(els.panel?.querySelector(".panel-body"), branch);
 }
 
@@ -2581,13 +2582,29 @@ function diagramHit(event) {
   if (event.target.closest?.("a, summary, input, textarea, select, label")) return null;
   const zoom = event.target.closest?.(".kc-diagram-zoom");
   if (zoom) {
-    const plate = zoom.closest(".kc-diagram-plate");
+    const figure = zoom.closest("figure.kc-diagram");
+    const plate = figure?.querySelector(".kc-diagram-plate") || zoom.closest(".kc-diagram-plate");
     return plate ? { plate, trigger: zoom } : null;
   }
   if (event.target.closest?.("button")) return null;
   const plate = event.target.closest?.(".kc-diagram-plate");
   if (!plate) return null;
-  return { plate, trigger: plate.querySelector(".kc-diagram-zoom") || plate };
+  const figure = plate.closest("figure.kc-diagram");
+  return { plate, trigger: figure?.querySelector(".kc-diagram-zoom") || plate };
+}
+
+function isDiagramShown(el) {
+  if (!el || typeof getComputedStyle !== "function") return false;
+  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (!style) return false;
+    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
+  }
+  if (el instanceof HTMLElement && el.offsetParent === null) {
+    const pos = getComputedStyle(el).position;
+    if (pos !== "fixed" && pos !== "sticky") return false;
+  }
+  return true;
 }
 
 function lightboxFocusables() {
@@ -2601,9 +2618,15 @@ function lightboxFocusables() {
 }
 
 function diagramSvg(plate) {
-  const scrolls = [...(plate?.querySelectorAll(".kc-diagram-scroll") || [])];
-  const visible = scrolls.find((el) => getComputedStyle(el).display !== "none");
-  return (visible || scrolls[0])?.querySelector("svg") || null;
+  const figure = plate?.closest?.("figure.kc-diagram") || plate;
+  const scrolls = [...(figure?.querySelectorAll(".kc-diagram-scroll") || [])];
+  for (const scroll of scrolls) {
+    if (!isDiagramShown(scroll)) continue;
+    const svg = [...scroll.querySelectorAll("svg")].find((node) => !node.closest(".kc-diagram-zoom") && isDiagramShown(node));
+    if (svg) return svg;
+  }
+  const loose = [...(figure?.querySelectorAll("svg") || [])].filter((node) => !node.closest(".kc-diagram-zoom"));
+  return loose.find((node) => isDiagramShown(node)) || null;
 }
 
 function openDiagramLightbox(plate, trigger) {

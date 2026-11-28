@@ -2661,11 +2661,15 @@ figure.kc-diagram:not(:has(.kc-diagram-plate)) {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
 }
+.kc-diagram-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin: 8px 2px 0;
+  min-height: 0;
+}
 .kc-diagram-zoom {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 2;
+  position: static;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2683,9 +2687,15 @@ figure.kc-diagram:not(:has(.kc-diagram-plate)) {
   box-shadow: var(--shadow-sm);
   cursor: zoom-in;
 }
-.kc-diagram-zoom-icon { display: block; }
+.kc-diagram-zoom-icon,
+figure.kc-diagram .kc-diagram-zoom svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
 .kc-diagram-plate a { cursor: pointer; }
-.kc-diagram-plate:hover .kc-diagram-zoom,
+figure.kc-diagram:hover .kc-diagram-zoom,
 .kc-diagram-zoom:hover,
 .kc-diagram-zoom:focus-visible {
   background: #fff;
@@ -2758,6 +2768,7 @@ figure.kc-diagram:not(:has(.kc-diagram-plate)) {
   font-family: var(--sans);
 }
 @media (max-width: 700px) {
+  .kc-diagram-toolbar { margin-top: 6px; }
   .kc-diagram-zoom { min-width: 44px; min-height: 44px; justify-content: center; padding: 0 12px; }
   .diagram-lightbox { padding: 0; }
   .diagram-lightbox-dialog {

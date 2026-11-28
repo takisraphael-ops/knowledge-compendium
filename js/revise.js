@@ -2,7 +2,7 @@
  * Revision / quiz UI. Card text stays in memory after unlock.
  * Scheduling writes only ids and SM-2 fields to localStorage.
  */
-import { escapeHtml, frameDiagramFigure, renderNotes, sanitizeDiagramSvg } from "./notes.js";
+import { escapeHtml, frameDiagramFigure, initDiagramZoom, renderNotes, sanitizeDiagramSvg } from "./notes.js";
 import { wrapPanelAbbrs } from "./abbr.js";
 import { allocateMockQuestions, collectCards, domainsForVersion, MOCK_EXAMS, SY0_VERSIONS } from "./cards.js";
 import {
@@ -340,6 +340,7 @@ function render() {
   else if (view === "mock-review") el.innerHTML = renderMockReview();
   else if (view === "pbq") el.innerHTML = renderPbq();
   else el.innerHTML = renderHub();
+  initDiagramZoom(el);
   if (view === "pbq") {
     wrapPanelAbbrs(el.querySelector(".rev-study-body") || el, "cybersecurity");
   } else if (view === "study") {
